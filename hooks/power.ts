@@ -1,5 +1,5 @@
-import type { ContextGauge, Limit } from '../types'
-import { CYAN, DARK, DIM, GROUND, LIT, VOID, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
+import type { ContextGauge, Limit, MemoryMap, MemorySlice } from '../types'
+import { AMBER, CYAN, DARK, DIM, GREEN, GROUND, LIT, PAPER, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
 import type { Layout } from './palette'
 
 const HOUR = 3_600_000
@@ -218,27 +218,6 @@ const clock = (ms: number | undefined, x: number, y: number, maxWidth: number): 
   return `<g transform="${frame}"><g>${parts.join('')}<set attributeName="display" to="none" begin="${seconds}s"/></g>${zero}</g>`
 }
 
-// 数え下ろさない7セグメント。大きい整数部と小さい小数部(「63」「.5」)を組む
-const gauge = (whole: string, fraction: string, x: number, y: number, maxWidth: number): string => {
-  const parts: string[] = []
-  let cursor = 0
-  for (const char of whole) {
-    parts.push(staticDigit(char, cursor, 0, BIG))
-    cursor += BIG_STEP
-  }
-  const smallY = BIG.h - SMALL.h
-  if (fraction) {
-    parts.push(`<rect x="${cursor}" y="${smallY + SMALL.h - 5}" width="5" height="5" fill="${LIT}"/>`)
-    cursor += 9
-    for (const char of fraction) {
-      parts.push(staticDigit(char, cursor, smallY, SMALL))
-      cursor += SMALL_STEP
-    }
-  }
-  const scale = Math.min(1, maxWidth / cursor)
-  return `<g transform="translate(${x} ${y}) scale(${scale}) ${SLANT}">${parts.join('')}</g>`
-}
-
 // ── 扇形セグメントのリングゲージ ─────────────────────────────
 // 36区画の輪で残量を示す。点灯区画は真上から時計回りに並べ、中央に回線番号と数値を出す
 
@@ -286,7 +265,7 @@ const ring = (
 
 // ── 1基ぶんの表示内容 ──────────────────────────────────────
 
-// 利用枠・コンテキスト・回線なしを同じ枠で描くための表示内容
+// 利用枠のタイマー1基ぶんの表示内容
 type Panel = {
   name: string
   english: string
@@ -363,10 +342,14 @@ const limitPanel = (limit: Limit, now: number): Panel => {
   }
 }
 
-const kilo = (tokens: number): string =>
-  tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M` : `${Math.round(tokens / 1000)}k`
+export const kilo = (tokens: number): string =>
+  tokens >= 1_000_000
+    ? `${(tokens / 1_000_000).toFixed(1)}M`
+    : tokens >= 1000
+      ? `${Math.round(tokens / 1000)}k`
+      : String(Math.round(tokens))
 
-// コンテキストの使用率で段階を決める。利用枠のHALT〜OVERRUNの位置に、空き具合の4段階を置く
+// コンテキストの使用率で段階を決める。電脳容量マップの最下段のランプに出す
 const CONTEXT_STAGES = [
   { label: 'NORMAL', below: 60 },
   { label: 'CAUTION', below: 80 },
@@ -374,52 +357,9 @@ const CONTEXT_STAGES = [
   { label: 'FULL', below: Number.POSITIVE_INFINITY },
 ]
 
-const contextPanel = (context: ContextGauge): Panel => {
-  const used =
-    context.tokens !== undefined && context.window > 0 ? (context.tokens / context.window) * 100 : context.percent
-  const left = used === undefined ? undefined : Math.max(0, 100 - used)
-  const stage = used === undefined ? undefined : CONTEXT_STAGES.find(one => used < one.below)
-  const [whole, fraction] = left === undefined ? ['--', ''] : left.toFixed(1).split('.')
-  return {
-    name: '電脳容量',
-    english: 'NEURAL MEMORY',
-    code: 'MEM',
-    caption: '記憶残量（%）',
-    captionEn: 'MEMORY FREE',
-    digits: (x, y, maxWidth) => gauge((whole ?? '--').padStart(2, '0'), fraction ?? '', x, y, maxWidth),
-    ratio: left === undefined ? undefined : left / 100,
-    ringValue: kilo(context.window),
-    footer: context.tokens === undefined ? '次の応答で計測' : `使用 ${kilo(context.tokens)} / ${kilo(context.window)}`,
-    lamps: CONTEXT_STAGES.map(({ label }) => ({ label, isOn: stage?.label === label })),
-    note: '※ 会話が長くなるほど減ります',
-    isDanger: used !== undefined && used >= 80,
-    tone: toneOf(left, used !== undefined && used >= 80),
-  }
-}
-
-const emptyPanel = (): Panel => ({
-  name: '第3回線',
-  english: 'NO LINK',
-  code: 'N/A',
-  caption: '回線未接続',
-  captionEn: 'NO LINK',
-  digits: (x, y, maxWidth) => clock(undefined, x, y, maxWidth),
-  ratio: undefined,
-  ringValue: '--',
-  footer: '',
-  lamps: MODES.map(({ label }) => ({ label, isOn: false })),
-  note: '※ 報告された利用枠がありません',
-  isDanger: false,
-  tone: 'red',
-})
-
-// 利用枠を先に、空いた基にコンテキスト、それでも空けば回線なしを割り当てる
-const panelsOf = (limits: readonly Limit[], context: ContextGauge | null, now: number): Panel[] => {
-  const panels = limits.slice(0, SLOTS).map(limit => limitPanel(limit, now))
-  if (panels.length < SLOTS && context) panels.push(contextPanel(context))
-  while (panels.length < SLOTS) panels.push(emptyPanel())
-  return panels
-}
+// 利用枠のタイマーを、報告された順に最大3基
+const panelsOf = (limits: readonly Limit[], now: number): Panel[] =>
+  limits.slice(0, SLOTS).map(limit => limitPanel(limit, now))
 
 // ── 部品 ────────────────────────────────────────────────
 
@@ -521,35 +461,174 @@ const compactModule = (panel: Panel, x: number, y: number): string => {
 </g>`, panel.tone)
 }
 
+// ── 電脳容量マップ ────────────────────────────────────────
+// /contextの内訳を、区画を並べた帯で描く。タイマーと同じ枠に収め、利用枠のタイマーの下(広い幅では空いた基)に置く。
+// 表示名だけ日本語にし、判定はkindで行う
+
+const SLICE_NAMES: Record<string, string> = {
+  'System prompt': '基幹プロンプト',
+  'System tools': '標準ツール',
+  'MCP tools': '外部回線ツール',
+  'Custom agents': '随伴機定義',
+  'Memory files': '記憶ファイル',
+  Skills: 'スキル',
+  Messages: '交信記録',
+  'Free space': '空き領域',
+  'Autocompact buffer': '圧縮予備域',
+  Used: '使用中',
+}
+
+export const sliceName = (slice: MemorySlice): string => SLICE_NAMES[slice.name] ?? slice.name
+
+const USED_COLORS = [GREEN, '#3FD9A0', '#C8FF7A', '#7FB8FF', PAPER, '#4FAF5A']
+
+// 使用中の区分を多い順に、そのあとに空き領域と圧縮予備域を並べる。空き領域は段階の配色の消灯色で塗る
+const ordered = (memory: MemoryMap): { slice: MemorySlice; color: string }[] => {
+  const used = memory.slices
+    .filter(one => one.kind === 'used' && one.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .map((slice, i) => ({ slice, color: USED_COLORS[i % USED_COLORS.length]! }))
+  const rest = memory.slices
+    .filter(one => one.kind === 'free' || one.kind === 'buffer')
+    .map(slice => ({ slice, color: slice.kind === 'free' ? DARK : 'none' }))
+  return [...used, ...rest]
+}
+
+// 内訳が取れないときは、窓の使用量だけで「使用中」と「空き領域」の2区分を作る
+export const memoryFrom = (context: ContextGauge | null): MemoryMap | null => {
+  if (context === null || context.window <= 0) return null
+  const used = context.tokens ?? (context.percent === undefined ? undefined : (context.percent / 100) * context.window)
+  if (used === undefined) return null
+  return {
+    slices: [
+      { name: 'Used', tokens: used, kind: 'used' },
+      { name: 'Free space', tokens: Math.max(0, context.window - used), kind: 'free' },
+    ],
+    used,
+    max: context.window,
+    percentage: (used / context.window) * 100,
+  }
+}
+
+const stageOf = (memory: MemoryMap | null): string | undefined =>
+  memory === null ? undefined : CONTEXT_STAGES.find(one => memory.percentage < one.below)?.label
+
+const memoryTone = (memory: MemoryMap | null): Tone =>
+  memory === null ? 'green' : toneOf(Math.max(0, 100 - memory.percentage), memory.percentage >= 80)
+
+const BUFFER_STROKE = ` stroke="${AMBER}" stroke-width="0.8"`
+
+// 電脳容量マップの1基。minHeightを渡すと、その高さまで最下段を下げてタイマーと高さを揃える
+const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height: number; draw: (x: number, y: number) => string } => {
+  const barX = 12
+  const barW = w - 24
+  const blocks = w >= 500 ? 50 : 32
+  const step = barW / blocks
+  const columns = w >= 500 ? 3 : 2
+  const rows = memory === null ? [] : ordered(memory)
+  const legendRows = Math.ceil(rows.length / columns)
+  const natural = 70 + legendRows * 15 + 52
+  const height = Math.max(minHeight, natural)
+  // タイマーと高さを揃えて余った分は、帯を太くするのに使う(最大で倍の高さまで)
+  const barH = 18 + Math.min(18, height - natural)
+  const legendTop = 72 + (barH - 18)
+  const lampsY = height - 26
+  const noteY = lampsY - 9
+  const stage = stageOf(memory)
+  const isDanger = memory !== null && memory.percentage >= 80
+
+  const total = memory === null ? 0 : rows.reduce((sum, one) => sum + one.slice.tokens, 0) || memory.max
+  let bufferStart: number | undefined
+  const cells = Array.from({ length: blocks }, (_, i) => {
+    if (memory === null || total <= 0) {
+      return `<rect x="${barX + i * step}" y="34" width="${step - 2}" height="${barH}" fill="${DARK}"/>`
+    }
+    // 区画の中心が、累積したトークンのどの区分に入るかで色を決める
+    const at = ((i + 0.5) / blocks) * total
+    let sum = 0
+    const hit = rows.find(one => (sum += one.slice.tokens) > at) ?? rows.at(-1)!
+    if (hit.slice.kind === 'buffer' && bufferStart === undefined) bufferStart = i
+    return `<rect x="${barX + i * step}" y="34" width="${step - 2}" height="${barH}" fill="${hit.color}"${hit.slice.kind === 'buffer' ? BUFFER_STROKE : ''}/>`
+  }).join('')
+  // 圧縮が始まる位置に、シアンの線で印を付ける
+  const line =
+    bufferStart === undefined
+      ? ''
+      : `<line x1="${barX + bufferStart * step - 1}" y1="30" x2="${barX + bufferStart * step - 1}" y2="${38 + barH}" stroke="${CYAN}" stroke-width="1.5"/>`
+  const columnW = barW / columns
+  const legend = rows
+    .map(({ slice, color }, i) => {
+      const x = barX + (i % columns) * columnW
+      const y = legendTop + Math.floor(i / columns) * 15
+      return `<rect x="${x}" y="${y - 8}" width="8" height="8" fill="${color}"${slice.kind === 'buffer' ? BUFFER_STROKE : ''}/>
+  ${text(x + 12, y, 10, slice.kind === 'used' ? PAPER : DIM, xml(clip(sliceName(slice), 9)))}
+  ${text(x + columnW - 10, y, 9, DIM, kilo(slice.tokens), { anchor: 'end', face: 'mono', weight: 500 })}`
+    })
+    .join('')
+  const lampW = (barW - 4 * 6) / 5
+  const lamps = CONTEXT_STAGES.map(({ label }, i) => lamp(barX + i * (lampW + 6), lampsY, lampW, 16, label, stage === label, 8)).join('')
+  const nameEnd = 10 + tagWidth(12, '電脳容量マップ')
+  const note =
+    memory === null
+      ? '※ 次の応答のあとで計測します'
+      : '※ 使用が圧縮予備域（橙の枠）に達すると、自動で記憶圧縮されます'
+
+  return {
+    height,
+    draw: (x, y) =>
+      recolor(`<g transform="translate(${x} ${y})">
+  ${plate(w, height, 14)}
+  ${tag(10, 8, 17, 12, LIT, GROUND, '電脳容量マップ')}
+  ${text(nameEnd + 8, 21, 7, DIM, 'NEURAL MEMORY MAP', { face: 'sans', weight: 800, spacing: 1 })}
+  ${text(w - 12, 21, 11, LIT, memory === null ? '計測待ち' : `使用 ${Math.round(memory.percentage)}% ／ ${kilo(memory.max)}`, { anchor: 'end', weight: 800 })}
+  <g filter="url(#glow)">${cells}</g>${line}
+  ${legend}
+  ${text(barX, noteY, 9, CYAN, note, { weight: 600 })}
+  ${lamps}
+  ${alert(barX + 4 * (lampW + 6), lampsY, lampW, 16, isDanger, 8, '限界警報')}
+</g>`, memoryTone(memory)),
+  }
+}
+
 // パネルの座標系の幅。mediumは電脳ログと同じ600にして文字の大きさを揃える
 export const layoutWidth = (layout: Layout): number =>
   layout === 'wide' ? SLOTS * MODULE_W + (SLOTS - 1) * GAP : layout === 'medium' ? STRIP_W : COMPACT_W
 
-// 3基のタイマーを並べる。wideは原寸3基を横に、mediumは横長の帯を縦に、narrowは小型を縦に積む
+// 利用枠のタイマーと電脳容量マップを並べる。
+// wide: 原寸のタイマーを横に並べ、空いた基に電脳容量マップ。3基とも埋まっていればマップを下に全幅で置く
+// medium: 横長の帯を縦に積み、その下にマップ。narrow: 小型を縦に積み、その下にマップ
 export const powerSvg = (
   limits: readonly Limit[],
-  context: ContextGauge | null,
+  memory: MemoryMap | null,
   now: number,
   layout: Layout,
   drawWidth: number,
 ): { source: string; width: number; height: number } => {
-  const panels = panelsOf(limits, context, now)
+  const panels = panelsOf(limits, now)
   const width = layoutWidth(layout)
-  const height =
-    layout === 'wide'
-      ? MODULE_H
-      : layout === 'medium'
-        ? SLOTS * STRIP_H + (SLOTS - 1) * STRIP_GAP
-        : SLOTS * COMPACT_H + (SLOTS - 1) * COMPACT_GAP
-  const modules = panels
-    .map((panel, i) =>
-      layout === 'wide'
-        ? timerModule(panel, i * (MODULE_W + GAP), 0)
-        : layout === 'medium'
-          ? stripModule(panel, 0, i * (STRIP_H + STRIP_GAP))
-          : compactModule(panel, 0, i * (COMPACT_H + COMPACT_GAP)),
-    )
-    .join('')
+  let modules: string
+  let height: number
+  if (layout === 'wide') {
+    const timers = panels.map((panel, i) => timerModule(panel, i * (MODULE_W + GAP), 0)).join('')
+    if (panels.length < SLOTS) {
+      const map = mapModule(memory, MODULE_W, MODULE_H)
+      modules = timers + map.draw(panels.length * (MODULE_W + GAP), 0)
+      height = MODULE_H
+    } else {
+      const map = mapModule(memory, width)
+      modules = timers + map.draw(0, MODULE_H + GAP)
+      height = MODULE_H + GAP + map.height
+    }
+  } else {
+    const isMedium = layout === 'medium'
+    const pitch = isMedium ? STRIP_H + STRIP_GAP : COMPACT_H + COMPACT_GAP
+    const timers = panels
+      .map((panel, i) => (isMedium ? stripModule(panel, 0, i * pitch) : compactModule(panel, 0, i * pitch)))
+      .join('')
+    const map = mapModule(memory, width)
+    modules = timers + map.draw(0, panels.length * pitch)
+    height = panels.length * pitch + map.height
+  }
   const size = svgSize(drawWidth, width, height)
   // 基と基のすき間や外枠のまわりが透けると、枠(iframe)の白い地が見えるので、全面を地の色で塗る
   const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${size.width}" height="${size.height}" style="background:${VOID}">
@@ -564,7 +643,7 @@ export const powerSvg = (
 // Svgのないターミナル向け。同じ内容を文字で並べる
 export const powerRows = (
   limits: readonly Limit[],
-  context: ContextGauge | null,
+  memory: MemoryMap | null,
   now: number,
 ): { text: string; color: string }[] => {
   const rows = limits.map(limit => {
@@ -579,11 +658,15 @@ export const powerRows = (
       color: TONES[tone].lit,
     }
   })
-  if (rows.length < SLOTS && context) {
-    const panel = contextPanel(context)
+  if (memory !== null) {
+    const top = ordered(memory)
+      .filter(one => one.slice.kind === 'used')
+      .slice(0, 3)
+      .map(one => `${sliceName(one.slice)} ${kilo(one.slice.tokens)}`)
+      .join(' ')
     rows.push({
-      text: `${panel.name} ${panel.caption} ${panel.footer} [${panel.lamps.find(one => one.isOn)?.label ?? '--'}]`,
-      color: TONES[panel.tone].lit,
+      text: `電脳容量 使用${Math.round(memory.percentage)}% ${kilo(memory.used)} / ${kilo(memory.max)} [${stageOf(memory)}] ${top}`,
+      color: TONES[memoryTone(memory)].lit,
     })
   }
   return rows

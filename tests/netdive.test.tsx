@@ -67,12 +67,12 @@ test('利用枠が届くと電脳限界を現在のペースで出し、90%超�
   expect(await pane.find({ text: /Fable週次 .* 残60% 再接続まで .* \[SYNC\]/ })).toBeDefined()
   await pane.unmount()
 
-  // 広いパネルは原寸3基を横、中くらいは上下を詰めた帯を縦、狭いパネルは小型を縦に積む。
+  // 広いパネルは原寸3基を横、中くらいは上下を詰めた帯を縦、狭いパネルは小型を縦に積み、どれも下に電脳容量マップを置く。
   // 枠(iframe)は宣言どおりの大きさで描かれるので、幅はセル数から、高さは縦横比から明示する
   for (const [bodyColumns, viewBox, width, height] of [
-    [130, 'viewBox="0 0 1228 214"', 988, 172],
-    [100, 'viewBox="0 0 600 370"', 760, 469],
-    [48, 'viewBox="0 0 400 410"', 364, 373],
+    [130, 'viewBox="0 0 1228 350"', 988, 282],
+    [100, 'viewBox="0 0 600 500"', 760, 633],
+    [48, 'viewBox="0 0 400 542"', 364, 493],
   ] as const) {
     const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns } })
     const power = (await desktop.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('電脳負荷'))
@@ -88,6 +88,9 @@ test('利用枠が届くと電脳限界を現在のペースで出し、90%超�
     // OVERRUNの基には、数値が消費ペースからの見込みだと注釈する
     expect(source).toContain('※ 今の消費ペースで使い切るまでの見込み')
     expect(source).not.toContain('STAND ALONE')
+    // コンテキストの使用量がまだ届いていないので、電脳容量マップは計測待ち
+    expect(source).toContain('電脳容量マップ')
+    expect(source).toContain('計測待ち')
     expect(power?.props.width).toBe(width)
     expect(power?.props.height).toBe(height)
     expect(source).toContain(`width="${width}" height="${height}"`)
@@ -100,7 +103,7 @@ test('利用枠が届くと電脳限界を現在のペースで出し、90%超�
   await band.unmount()
 })
 
-test('利用枠が2つのとき、3基目に電脳容量を出し、残量で緑と橙に塗り分ける', async ($, on) => {
+test('利用枠が2つのとき、3基目の位置に電脳容量マップを出し、使用率で緑と橙に塗り分ける', async ($, on) => {
   mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
   on('session.measure', (_, e) => ({ changed: e.changed }))
   // 200kの窓で120k使用。残り40.0%、使用60%なのでCAUTION
@@ -114,16 +117,20 @@ test('利用枠が2つのとき、3基目に電脳容量を出し、残量で緑
   })
 
   const terminal = await $.ui.mount({ ...PANE, surface: 'terminal', props: PANE_PROPS })
-  expect(await terminal.find({ text: /電脳容量 記憶残量（%） 使用 120k \/ 200k \[CAUTION\]/ })).toBeDefined()
+  expect(await terminal.find({ text: /電脳容量 使用60% 120k \/ 200k \[CAUTION\]/ })).toBeDefined()
   await terminal.unmount()
 
-  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns: 70 } })
+  // 広い幅では、利用枠2基の右(3基目の位置)に電脳容量マップを置き、高さをタイマーに揃える
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns: 130 } })
   const power = (await desktop.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('電脳負荷'))
   const source = String(power?.props.source)
-  expect(source).toContain('電脳容量')
+  expect(source).toContain('viewBox="0 0 1228 214"')
+  expect(source).toContain('電脳容量マップ')
+  expect(source).toContain('使用 60% ／ 200k')
   expect(source).toContain('CAUTION')
-  expect(source).not.toContain('NO LINK')
-  // 残り82%と88%の利用枠は緑、残り40%の電脳容量は橙で描く
+  // 記憶残量のタイマーはマップと重複するので出さない
+  expect(source).not.toContain('記憶残量')
+  // 残り82%と88%の利用枠は緑、使用60%の電脳容量マップは橙で描く
   expect(source.split('url(#frame-green)').length - 1).toBe(2)
   expect(source.split('url(#frame-amber)').length - 1).toBe(1)
   expect(source).not.toContain('url(#frame-red)')
@@ -217,7 +224,7 @@ test('随伴機の実行を専用レーンに打刻し、ターンのトーク�
   await terminal.unmount()
 })
 
-test('作戦経費とコンテキストの内訳を計器と記憶領域マップに出す', async ($, on) => {
+test('作戦経費を計器に、コンテキストの内訳を電脳容量マップに出す', async ($, on) => {
   mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('session.usage', () => ({
@@ -256,9 +263,12 @@ test('作戦経費とコンテキストの内訳を計器と記憶領域マッ�
 
   for (const bodyColumns of [130, 100, 48]) {
     const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns } })
-    const vitals = (await desktop.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('電脳バイタル'))
-    const source = String(vitals?.props.source)
-    expect(source).toContain('$1.50')
+    const svgs = await desktop.findAll({ type: 'Svg' })
+    const vitals = String(svgs.find(one => String(one.props.alt).startsWith('電脳バイタル'))?.props.source)
+    expect(vitals).toContain('$1.50')
+    // 内訳は利用枠のタイマーと同じSVGの、電脳容量マップに出す
+    const source = String(svgs.find(one => String(one.props.alt).startsWith('電脳負荷'))?.props.source)
+    expect(source).toContain('電脳容量マップ')
     expect(source).toContain('使用 60% ／ 200k')
     // 内訳の名前は日本語で出し、遅延読み込みのツール定義は数えない
     expect(source).toContain('交信記録')

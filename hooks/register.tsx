@@ -4,8 +4,8 @@ import type { Register, Timer } from 'claude-code'
 import type { Alarm, ContextGauge, Escort, Limit, LogEntry, MemoryMap, UnitName, Units, Verdict } from '../types'
 import { UNIT_LABEL, UNIT_NAMES, VERDICT_COLOR, VERDICT_TEXT, boardSvg, elapsed, escortsShown, logRowsFor, shortModel } from './board'
 import { AMBER, GREEN, MOSS, RED, VOID, clip, drawWidthOf, layoutOf, paneHeightOf } from './palette'
-import { critical, labelOf, powerRows, powerSvg, resetIn } from './power'
-import { vitalsRows, vitalsSvg } from './vitals'
+import { critical, labelOf, memoryFrom, powerRows, powerSvg, resetIn } from './power'
+import { vitalsRow, vitalsSvg } from './vitals'
 
 const PANE = 'netdive-monitor'
 const TITLE = 'NETDIVE QUOTA'
@@ -20,7 +20,7 @@ const startedAt = atom({ plugin: 'netdive-quota', key: 'startedAt' } as const, 0
 const alarm = atom({ plugin: 'netdive-quota', key: 'alarm' } as const, null)
 const bash = atom({ plugin: 'netdive-quota', key: 'bash' } as const, null)
 const limits = atom({ plugin: 'netdive-quota', key: 'limits' } as const, [])
-// 利用枠が3つに満たないとき、空いた基に出すコンテキストの使用量
+// コンテキストの使用量。内訳(memory)がまだ取れていないときの電脳容量マップに使う
 const context = atom({ plugin: 'netdive-quota', key: 'context' } as const, null)
 // タイマーの数え下ろしの起点。秒はSVGの中で進むので、ここは利用枠かコンテキストが動いたときと10分ごとにだけ書き換える。
 // 書き換えるとタイマーのSVGが描き直されるため、頻度を上げるとチラつく
@@ -250,7 +250,8 @@ export const register: Register = on => {
     const squad = await read($, escorts)
     const spent = await read($, cost)
     const tally = await read($, tokens)
-    const map = await read($, memory)
+    // 内訳がまだ取れていなければ、窓の使用量だけで電脳容量マップを描く
+    const map = (await read($, memory)) ?? memoryFrom(gauge)
     const now = await $.clock.now()
     const isDiving = (Object.values(state) as Units[UnitName][]).some(one => one.verdict === 'running')
     const decision: Verdict = isDiving ? 'running' : (list.at(-1)?.verdict ?? 'idle')
@@ -261,14 +262,12 @@ export const register: Register = on => {
       const room = Math.max(4, (e.viewport?.rows ?? 40) - 15 - windows.length - shown.length)
       return (
         <Box flexDirection="column">
-          {powerRows(windows, gauge, at).map(row => (
+          {powerRows(windows, map, at).map(row => (
             <Text color={row.color} bold>
               {row.text}
             </Text>
           ))}
-          {vitalsRows(spent, tally, map, origin, now).map(row => (
-            <Text color={GREEN}>{row}</Text>
-          ))}
+          <Text color={GREEN}>{vitalsRow(spent, tally, origin, now)}</Text>
           <Text color={GREEN} bold>
             ▌作業班トレース ── 状況 {VERDICT_TEXT[decision]}
           </Text>
@@ -298,8 +297,8 @@ export const register: Register = on => {
     const { Svg } = $.ui.resolve(e)
     const drawWidth = drawWidthOf(e.props.bodyColumns)
     const layout = layoutOf(drawWidth)
-    const power = powerSvg(windows, gauge, at, layout, drawWidth)
-    const vitals = vitalsSvg(spent, tally, map, origin, now, layout, drawWidth)
+    const power = powerSvg(windows, map, at, layout, drawWidth)
+    const vitals = vitalsSvg(spent, tally, origin, now, layout, drawWidth)
     const rows = logRowsFor(layout, drawWidth, paneHeightOf(e.props.scroll.bodyRows), power.height + vitals.height, squad)
     const board = boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows)
     return (
@@ -308,7 +307,7 @@ export const register: Register = on => {
           source={power.source}
           width={power.width}
           height={power.height}
-          alt={`電脳負荷: ${powerRows(windows, gauge, at)
+          alt={`電脳負荷: ${powerRows(windows, map, at)
             .map(row => row.text)
             .join(' / ')}`}
           isInteractive
@@ -317,7 +316,7 @@ export const register: Register = on => {
           source={vitals.source}
           width={vitals.width}
           height={vitals.height}
-          alt={`電脳バイタル: ${vitalsRows(spent, tally, map, origin, now).join(' / ')}`}
+          alt={`電脳バイタル: ${vitalsRow(spent, tally, origin, now)}`}
         />
         <Svg
           source={board.source}
