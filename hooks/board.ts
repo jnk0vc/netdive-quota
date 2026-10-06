@@ -1,5 +1,5 @@
 import type { Escort, LogEntry, UnitName, Units, Verdict } from '../types'
-import { AMBER, CYAN, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
+import { AMBER, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
 import type { Layout } from './palette'
 
 export const UNIT_LABEL: Record<UnitName, string> = { SCOUT: '索敵', REWRITE: '改竄', DIVE: '潜入' }
@@ -28,7 +28,7 @@ export const elapsed = (from: number, at: number): string => {
 // ── 作業班トレース ────────────────────────────────────────
 // 3班を横長のレーンに並べ、ツールの実行を1回1列で打刻する。右端が最新。
 // その下に随伴機(サブエージェント)のレーンを足し、その機体が行った実行を同じ列に重ねて打刻する。
-// 列の下に通し番号の目盛りを振り、欄外にシアンで受け持ちを注釈する
+// 列の下には通し番号の目盛りを振る
 
 const LANE_TOP = 46
 const LANE_H = 40
@@ -36,13 +36,6 @@ const STEP = 12
 // 随伴機のレーンの上の見出し行の高さ
 const ESCORT_HEAD = 22
 const ESCORT_SLOTS = 3
-
-const NOTES = [
-  '※1 索敵＝読み取り（Read・Grep・Glob ほか）',
-  '　  改竄＝書き換え（Edit・Write）／潜入＝実行（Bash ほか）',
-  '※2 1列が1回の実行。右端が最新で、点滅は実行中',
-  '※3 随伴機＝サブエージェント。その実行は班のレーンにも打刻',
-]
 
 // 実行中の機体を先に、そのあとに新しい順で、最大3機を出す
 export const escortsShown = (escorts: readonly Escort[]): Escort[] =>
@@ -53,7 +46,8 @@ export const escortsShown = (escorts: readonly Escort[]): Escort[] =>
 
 const tapeY = (escortCount: number): number => LANE_TOP + 3 * LANE_H + ESCORT_HEAD + escortCount * LANE_H
 
-export const traceHeight = (escortCount: number): number => tapeY(escortCount) + 30 + NOTES.length * 14
+// 目盛りの番号(目盛りの18px下)まで入る高さ
+export const traceHeight = (escortCount: number): number => tapeY(escortCount) + 26
 
 // claude-haiku-4-5-20251001 → haiku-4-5
 export const shortModel = (model: string): string => model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -135,8 +129,7 @@ const trace = (
     ...escortLanes.map((one, row) => lane(one, escortTop + row * LANE_H)),
   ].join('')
   const escortHead = `${text(0, escortTop - 7, 10, GREEN, '随伴機', { weight: 800 })}
-  ${text(36, escortTop - 7, 7, MOSS, 'ESCORTS', { face: 'sans', weight: 800, spacing: 1.2 })}
-  ${text(trackX, escortTop - 7, 9, CYAN, '※3', { weight: 700 })}
+  ${text(36, escortTop - 7, 7, MOSS, 'SUB-AGENTS', { face: 'sans', weight: 800, spacing: 1.2 })}
   ${text(width, escortTop - 7, 9, MOSS, escorts.length === 0 ? '出撃なし' : `出撃 ${escorts.length}機`, { anchor: 'end' })}
   <line x1="0" y1="${escortTop - 3}" x2="${width}" y2="${escortTop - 3}" stroke="${MOSS}" stroke-dasharray="2 3"/>`
 
@@ -152,13 +145,11 @@ const trace = (
   }).join('')
 
   const title = tagWidth(13, '作業班トレース')
-  const notes = NOTES.map((one, i) => text(14, tapeTop + 34 + i * 14, 10, CYAN, one, { weight: 600 })).join('')
   const escortFrame = shown.length
     ? `<rect x="${trackX - 4}" y="${escortTop}" width="${columns * STEP + 8}" height="${shown.length * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>`
     : ''
   return `${tag(0, 4, 20, 13, GREEN, VOID, '作業班トレース')}
-  ${text(title + 4, 12, 9, CYAN, '※1', { weight: 700 })}
-  ${text(title + 26, 20, 8, MOSS, 'UNIT TRACE', { face: 'sans', weight: 800, spacing: 1.5 })}
+  ${text(title + 8, 20, 8, MOSS, 'UNIT TRACE', { face: 'sans', weight: 800, spacing: 1.5 })}
   ${text(width, 21, 15, VERDICT_COLOR[decision], `状況　${VERDICT_TEXT[decision]}`, { anchor: 'end', weight: 800 })}
   <line x1="0" y1="32" x2="${width}" y2="32" stroke="${MOSS}"/>
   <rect x="${trackX - 4}" y="${LANE_TOP - 2}" width="${columns * STEP + 8}" height="${3 * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>
@@ -166,9 +157,7 @@ const trace = (
   ${escortHead}
   ${lanes}
   ${tape}
-  ${text(trackX + columns * STEP + 4, LANE_TOP - 6, 7, MOSS, 'LATEST ▾', { anchor: 'end', face: 'sans', weight: 800, spacing: 1 })}
-  <polyline points="6,${tapeTop + 4} 6,${tapeTop + 30} 10,${tapeTop + 30}" fill="none" stroke="${CYAN}" stroke-width="1"/>
-  ${notes}`
+  ${text(trackX + columns * STEP + 4, LANE_TOP - 6, 7, MOSS, 'LATEST ▾', { anchor: 'end', face: 'sans', weight: 800, spacing: 1 })}`
 }
 
 const ROW_H = 22

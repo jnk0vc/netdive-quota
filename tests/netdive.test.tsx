@@ -160,9 +160,10 @@ test('ツール実行が成功・遮断として記録され、両サーフェ�
       expect(source).toContain('電脳ログ')
       expect(source).toContain('app.ts')
       expect(source).toContain('Hiragino Kaku Gothic')
-      // 3班は横長のレーンに並べ、欄外に受け持ちの注釈を添える
+      // 3班は横長のレーンに並べる。受け持ちの説明はREADMEに任せ、パネルには注記を出さない
       expect(source).toContain('作業班トレース')
-      expect(source).toContain('※1 索敵＝読み取り')
+      expect(source).toContain('索敵')
+      expect(source).not.toContain('※1')
       expect(await pane.find({ type: 'Text' })).toBeUndefined()
     } else {
       expect(await pane.find({ text: /電脳ログ/ })).toBeDefined()
@@ -216,7 +217,7 @@ test('随伴機の実行を専用レーンに打刻し、ターンのトーク�
   const board = String(svgs.find(one => String(one.props.alt).startsWith('作業班トレース'))?.props.source)
   expect(board).toContain('Explore')
   expect(board).toContain('haiku-4-5 ×1')
-  expect(board).toContain('※3 随伴機＝サブエージェント')
+  expect(board).toContain('SUB-AGENTS')
   const vitals = String(svgs.find(one => String(one.props.alt).startsWith('電脳バイタル'))?.props.source)
   expect(vitals).toContain('記憶再利用率')
   expect(vitals).toContain('>60%<')
