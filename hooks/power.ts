@@ -287,12 +287,13 @@ type Panel = {
 
 export type Tone = 'green' | 'amber' | 'red'
 
-type ToneColors = { lit: string; dark: string; ground: string; dim: string; frame: [string, string, string] }
+// gridは外枠の中に敷く方眼の線の色。地の色からわずかに浮く程度にする
+type ToneColors = { lit: string; dark: string; ground: string; dim: string; grid: string; frame: [string, string, string] }
 
 const TONES: Record<Tone, ToneColors> = {
-  green: { lit: '#7CFF6B', dark: '#0F3A17', ground: '#041A0A', dim: '#2F8F3A', frame: ['#1E7A30', '#7CFF6B', '#D2FFC4'] },
-  amber: { lit: '#FFA531', dark: '#3A2108', ground: '#140A02', dim: '#A0601A', frame: ['#7CFF6B', '#FFA531', '#FF5A2A'] },
-  red: { lit: LIT, dark: DARK, ground: GROUND, dim: DIM, frame: ['#FFA531', LIT, '#8A0E08'] },
+  green: { lit: '#7CFF6B', dark: '#0F3A17', ground: '#041A0A', dim: '#2F8F3A', grid: '#0A2A12', frame: ['#1E7A30', '#7CFF6B', '#D2FFC4'] },
+  amber: { lit: '#FFA531', dark: '#3A2108', ground: '#140A02', dim: '#A0601A', grid: '#2A1A06', frame: ['#7CFF6B', '#FFA531', '#FF5A2A'] },
+  red: { lit: LIT, dark: DARK, ground: GROUND, dim: DIM, grid: '#2A0A08', frame: ['#FFA531', LIT, '#8A0E08'] },
 }
 
 // 残り50%超は緑、20%以上は橙、それ未満と危険時は赤。使い切る見込み(OVERRUN)なら緑にはしない
@@ -311,13 +312,17 @@ const recolor = (svg: string, tone: Tone): string => {
     .split(GROUND).join(colors.ground)
     .split(DIM).join(colors.dim)
     .split('url(#frame)').join(`url(#frame-${tone})`)
+    .split('url(#grid)').join(`url(#grid-${tone})`)
 }
 
-const frameGradients = (): string =>
+// 段階ごとの外枠のグラデーションと方眼。方眼も段階の色にしないと、橙や赤の基の中に緑の線が透ける
+const toneDefs = (): string =>
   (Object.keys(TONES) as Tone[])
     .map(tone => {
-      const [from, middle, to] = TONES[tone].frame
-      return `<linearGradient id="frame-${tone}" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="${from}"/><stop offset="0.55" stop-color="${middle}"/><stop offset="1" stop-color="${to}"/></linearGradient>`
+      const { frame, grid } = TONES[tone]
+      const [from, middle, to] = frame
+      return `<linearGradient id="frame-${tone}" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="${from}"/><stop offset="0.55" stop-color="${middle}"/><stop offset="1" stop-color="${to}"/></linearGradient>
+  <pattern id="grid-${tone}" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="${grid}" stroke-width="1"/></pattern>`
     })
     .join('')
 
@@ -482,16 +487,17 @@ export const sliceName = (slice: MemorySlice): string => SLICE_NAMES[slice.name]
 
 const USED_COLORS = [GREEN, '#3FD9A0', '#C8FF7A', '#7FB8FF', PAPER, '#4FAF5A']
 
-// 使用中の区分を多い順に、そのあとに空き領域と圧縮予備域を並べる。空き領域は段階の配色の消灯色で塗る
+// 使用中の区分を多い順に、そのあとに空き領域、最後に圧縮予備域を並べる。
+// 使用が空き領域を食い尽くして予備域に入ると自動圧縮が始まるので、予備域は必ず右端に置く。
+// /contextの内訳は予備域を空き領域より先に返すことがあるため、届いた順には頼らない
 const ordered = (memory: MemoryMap): { slice: MemorySlice; color: string }[] => {
   const used = memory.slices
     .filter(one => one.kind === 'used' && one.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
     .map((slice, i) => ({ slice, color: USED_COLORS[i % USED_COLORS.length]! }))
-  const rest = memory.slices
-    .filter(one => one.kind === 'free' || one.kind === 'buffer')
-    .map(slice => ({ slice, color: slice.kind === 'free' ? DARK : 'none' }))
-  return [...used, ...rest]
+  const free = memory.slices.filter(one => one.kind === 'free').map(slice => ({ slice, color: DARK }))
+  const buffer = memory.slices.filter(one => one.kind === 'buffer').map(slice => ({ slice, color: 'none' }))
+  return [...used, ...free, ...buffer]
 }
 
 // 内訳が取れないときは、窓の使用量だけで「使用中」と「空き領域」の2区分を作る
@@ -633,7 +639,7 @@ export const powerSvg = (
   // 基と基のすき間や外枠のまわりが透けると、枠(iframe)の白い地が見えるので、全面を地の色で塗る
   const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${size.width}" height="${size.height}" style="background:${VOID}">
   <rect width="${width}" height="${height}" fill="${VOID}"/>
-  <defs>${crtDefs()}${frameGradients()}</defs>
+  <defs>${crtDefs()}${toneDefs()}</defs>
   ${modules}
   ${scanlines(width, height)}
 </svg>`

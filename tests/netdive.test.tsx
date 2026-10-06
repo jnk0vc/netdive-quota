@@ -134,6 +134,10 @@ test('利用枠が2つのとき、3基目の位置に電脳容量マップを出
   expect(source.split('url(#frame-green)').length - 1).toBe(2)
   expect(source.split('url(#frame-amber)').length - 1).toBe(1)
   expect(source).not.toContain('url(#frame-red)')
+  // 外枠の中の方眼も段階の色で描く。橙の基に緑の方眼が透けない
+  expect(source.split('url(#grid-green)').length - 1).toBe(2)
+  expect(source.split('url(#grid-amber)').length - 1).toBe(1)
+  expect(source).not.toContain('fill="url(#grid)"')
   await desktop.unmount()
 })
 
@@ -239,8 +243,9 @@ test('作戦経費を計器に、コンテキストの内訳を電脳容量マ�
         categories: [
           { name: 'System prompt', tokens: 10_000, color: 'promptBorder', isDeferred: false, kind: 'used' },
           { name: 'Messages', tokens: 110_000, color: 'purple', isDeferred: false, kind: 'used' },
-          { name: 'Free space', tokens: 47_000, color: 'promptBorder', isDeferred: false, kind: 'free' },
+          // 実際の内訳と同じく、予備域が空き領域より先に届く
           { name: 'Autocompact buffer', tokens: 33_000, color: 'inactive', isDeferred: false, kind: 'buffer' },
+          { name: 'Free space', tokens: 47_000, color: 'promptBorder', isDeferred: false, kind: 'free' },
           { name: 'MCP tools', tokens: 5_000, color: 'cyan', isDeferred: true, kind: 'deferred' },
         ],
         totalTokens: 120_000,
@@ -274,6 +279,10 @@ test('作戦経費を計器に、コンテキストの内訳を電脳容量マ�
     expect(source).toContain('交信記録')
     expect(source).toContain('圧縮予備域')
     expect(source).not.toContain('外部回線ツール')
+    // 予備域は届いた順によらず帯の右端に置き、凡例でも空き領域のあとに並べる
+    const blocks = source.match(/<rect x="[\d.]+" y="34" [^>]*\/>/g) ?? []
+    expect(blocks.at(-1)).toContain('stroke="#FFA531"')
+    expect(source.indexOf('>空き領域<')).toBeLessThan(source.indexOf('>圧縮予備域<'))
     await desktop.unmount()
   }
 })
