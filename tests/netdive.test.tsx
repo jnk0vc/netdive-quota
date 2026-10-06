@@ -244,6 +244,10 @@ test('作戦経費を計器に、コンテキストの内訳を電脳容量マ�
         categories: [
           { name: 'System prompt', tokens: 10_000, color: 'promptBorder', isDeferred: false, kind: 'used' },
           { name: 'Messages', tokens: 110_000, color: 'purple', isDeferred: false, kind: 'used' },
+          { name: 'MCP server instructions', tokens: 1000, color: 'cyan', isDeferred: false, kind: 'used' },
+          // 置き換え表にない英語名。短いものはそのまま、長いものは列の幅で切り詰める
+          { name: 'Plugin hooks', tokens: 800, color: 'cyan', isDeferred: false, kind: 'used' },
+          { name: 'Some very long category name from a future build', tokens: 600, color: 'cyan', isDeferred: false, kind: 'used' },
           // 実際の内訳と同じく、予備域が空き領域より先に届く
           { name: 'Autocompact buffer', tokens: 33_000, color: 'inactive', isDeferred: false, kind: 'buffer' },
           { name: 'Free space', tokens: 47_000, color: 'promptBorder', isDeferred: false, kind: 'free' },
@@ -280,6 +284,10 @@ test('作戦経費を計器に、コンテキストの内訳を電脳容量マ�
     expect(source).toContain('交信記録')
     expect(source).toContain('圧縮予備域')
     expect(source).not.toContain('外部回線ツール')
+    // 凡例の名前は文字数ではなく表示幅で切り詰めるので、列に収まる英語名は省略しない
+    expect(source).toContain('>MCP server<')
+    expect(source).toContain('>Plugin hooks<')
+    expect(source).toMatch(/>Some very long[^<]*…</)
     // 予備域は届いた順によらず帯の右端に置き、凡例でも空き領域のあとに並べる
     const blocks = source.match(/<rect x="[\d.]+" y="34" [^>]*\/>/g) ?? []
     expect(blocks.at(-1)).toContain('stroke="#FFA531"')

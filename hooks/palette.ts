@@ -56,6 +56,25 @@ export const xml = (text: string): string =>
 export const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text
 
+// 1文字の描画幅の見積もり。漢字・かな・全角記号は文字の大きさと同じ、英数字はその6割強とする
+const glyphWidth = (char: string, size: number): number => ((char.codePointAt(0) ?? 0) >= 0x2e80 ? size : size * 0.62)
+
+// 表示幅がmaxWidthに収まるよう切り詰める。英語名は日本語より細いので、文字数で切ると収まる名前まで省略してしまう
+export const fitText = (text: string, size: number, maxWidth: number): string => {
+  const chars = [...text]
+  const widthOf = (list: string[]) => list.reduce((sum, char) => sum + glyphWidth(char, size), 0)
+  if (widthOf(chars) <= maxWidth) return text
+  const room = maxWidth - glyphWidth('…', size)
+  let width = 0
+  let count = 0
+  for (const char of chars) {
+    width += glyphWidth(char, size)
+    if (width > room) break
+    count += 1
+  }
+  return `${chars.slice(0, count).join('')}…`
+}
+
 export type Face = 'gothic' | 'sans' | 'mono'
 
 const FACES: Record<Face, string> = { gothic: GOTHIC, sans: SANS, mono: MONO }

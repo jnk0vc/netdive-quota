@@ -1,5 +1,5 @@
 import type { ContextGauge, Limit, MemoryMap, MemorySlice } from '../types'
-import { AMBER, CYAN, DARK, DIM, GREEN, GROUND, LIT, PAPER, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
+import { AMBER, CYAN, DARK, DIM, GREEN, GROUND, LIT, PAPER, VOID, crtDefs, fitText, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
 import type { Layout } from './palette'
 
 const HOUR = 3_600_000
@@ -474,6 +474,8 @@ const SLICE_NAMES: Record<string, string> = {
   'System prompt': '基幹プロンプト',
   'System tools': '標準ツール',
   'MCP tools': '外部回線ツール',
+  // MCPサーバーの説明文。英語のまま短く出す
+  'MCP server instructions': 'MCP server',
   'Custom agents': '随伴機定義',
   'Memory files': '記憶ファイル',
   Skills: 'スキル',
@@ -566,9 +568,12 @@ const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height
     .map(({ slice, color }, i) => {
       const x = barX + (i % columns) * columnW
       const y = legendTop + Math.floor(i / columns) * 15
+      // 名前は、右寄せのトークン数(等幅9px、1文字約5.5px)とのあいだに6pxの隙間を残した幅に収める
+      const amount = kilo(slice.tokens)
+      const room = columnW - 12 - 10 - amount.length * 5.5 - 6
       return `<rect x="${x}" y="${y - 8}" width="8" height="8" fill="${color}"${slice.kind === 'buffer' ? BUFFER_STROKE : ''}/>
-  ${text(x + 12, y, 10, slice.kind === 'used' ? PAPER : DIM, xml(clip(sliceName(slice), 9)))}
-  ${text(x + columnW - 10, y, 9, DIM, kilo(slice.tokens), { anchor: 'end', face: 'mono', weight: 500 })}`
+  ${text(x + 12, y, 10, slice.kind === 'used' ? PAPER : DIM, xml(fitText(sliceName(slice), 10, room)))}
+  ${text(x + columnW - 10, y, 9, DIM, amount, { anchor: 'end', face: 'mono', weight: 500 })}`
     })
     .join('')
   const lampW = (barW - 4 * 6) / 5

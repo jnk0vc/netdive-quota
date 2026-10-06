@@ -1,6 +1,6 @@
 {
   "name": "netdive-quota",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "A phosphor-green net-dive monitor side pane: segmented ring quota timers, a context memory map, cost and cache gauges, an annotated unit and subagent trace, and a warning band, all following this session",
   "author": {
     "name": "Jank0vic",
