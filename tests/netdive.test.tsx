@@ -67,12 +67,12 @@ test('利用枠が届くと電脳限界を現在のペースで出し、90%超�
   expect(await pane.find({ text: /Fable週次 .* 残60% 再接続まで .* \[SYNC\]/ })).toBeDefined()
   await pane.unmount()
 
-  // 広いパネルは原寸3基を横、中くらいは上下を詰めた帯を縦、狭いパネルは原寸を縦に積む。
+  // 広いパネルは原寸3基を横、中くらいは上下を詰めた帯を縦、狭いパネルは小型を縦に積む。
   // 枠(iframe)は宣言どおりの大きさで描かれるので、幅はセル数から、高さは縦横比から明示する
   for (const [bodyColumns, viewBox, width, height] of [
     [130, 'viewBox="0 0 1228 214"', 988, 172],
     [100, 'viewBox="0 0 600 370"', 760, 469],
-    [48, 'viewBox="0 0 400 670"', 364, 610],
+    [48, 'viewBox="0 0 400 410"', 364, 373],
   ] as const) {
     const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns } })
     const power = (await desktop.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('電脳負荷'))
@@ -163,5 +163,107 @@ test('ツール実行が成功・遮断として記録され、両サーフェ�
     const band = await $.ui.mount({ plugin: 'netdive-quota', surface, component: 'AbovePrompt', props: BAND_PROPS })
     expect(await band.find({ text: /遮断 BLOCKED/ })).toBeDefined()
     await band.unmount()
+  }
+})
+
+test('随伴機の実行を専用レーンに打刻し、ターンのトークンから記憶再利用率を出す', async ($, on) => {
+  mock.clock(on, { now: 1000 })
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'agent-1' }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.agent.spawn({
+    tool_use_id: 'toolu_agent',
+    prompt: 'src以下を調べる',
+    description: '構成調査',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: false,
+    fork: false,
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/src/main.ts', agentId: 'agent-1' })
+  // 入力の合計500のうち300をキャッシュから読んだので、記憶再利用率は60%
+  await $.turn.complete({
+    answer: '調査完了',
+    durationMs: 1200,
+    isAborted: false,
+    turnId: 'turn-1',
+    agentId: 'agent-1',
+    reason: 'answer',
+    usage: {
+      model: 'claude-haiku-4-5-20251001',
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_input_tokens: 300,
+      cache_creation_input_tokens: 100,
+    },
+  })
+
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: PANE_PROPS })
+  const svgs = await desktop.findAll({ type: 'Svg' })
+  const board = String(svgs.find(one => String(one.props.alt).startsWith('作業班トレース'))?.props.source)
+  expect(board).toContain('Explore')
+  expect(board).toContain('haiku-4-5 ×1')
+  expect(board).toContain('※3 随伴機＝サブエージェント')
+  const vitals = String(svgs.find(one => String(one.props.alt).startsWith('電脳バイタル'))?.props.source)
+  expect(vitals).toContain('記憶再利用率')
+  expect(vitals).toContain('>60%<')
+  await desktop.unmount()
+
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal', props: PANE_PROPS })
+  expect(await terminal.find({ text: /随伴機 Explore「構成調査」 成功 haiku-4-5 ×1/ })).toBeDefined()
+  expect(await terminal.find({ text: /記憶再利用率 60%/ })).toBeDefined()
+  await terminal.unmount()
+})
+
+test('作戦経費とコンテキストの内訳を計器と記憶領域マップに出す', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.usage', () => ({
+    value: {
+    startedAt: Date.parse('2026-10-05T08:00:00Z'),
+    rateLimits: [],
+    cost: { usd: 1.5 },
+    context: {
+      tokens: 120_000,
+      window: 200_000,
+      breakdown: {
+        categories: [
+          { name: 'System prompt', tokens: 10_000, color: 'promptBorder', isDeferred: false, kind: 'used' },
+          { name: 'Messages', tokens: 110_000, color: 'purple', isDeferred: false, kind: 'used' },
+          { name: 'Free space', tokens: 47_000, color: 'promptBorder', isDeferred: false, kind: 'free' },
+          { name: 'Autocompact buffer', tokens: 33_000, color: 'inactive', isDeferred: false, kind: 'buffer' },
+          { name: 'MCP tools', tokens: 5_000, color: 'cyan', isDeferred: true, kind: 'deferred' },
+        ],
+        totalTokens: 120_000,
+        maxTokens: 200_000,
+        rawMaxTokens: 200_000,
+        percentage: 60,
+        gridRows: [],
+        model: 'claude-opus-5-5',
+        autocompactSource: 'default',
+      },
+    },
+    },
+  }))
+  await $.session.measure({
+    context: { tokens: 120_000, window: 200_000 },
+    rateLimits: [],
+    cost: { usd: 1.5 },
+    changed: ['context', 'cost'],
+  })
+
+  for (const bodyColumns of [130, 100, 48]) {
+    const desktop = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns } })
+    const vitals = (await desktop.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('電脳バイタル'))
+    const source = String(vitals?.props.source)
+    expect(source).toContain('$1.50')
+    expect(source).toContain('使用 60% ／ 200k')
+    // 内訳の名前は日本語で出し、遅延読み込みのツール定義は数えない
+    expect(source).toContain('交信記録')
+    expect(source).toContain('圧縮予備域')
+    expect(source).not.toContain('外部回線ツール')
+    await desktop.unmount()
   }
 })

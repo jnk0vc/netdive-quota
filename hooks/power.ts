@@ -430,8 +430,8 @@ const lamp = (x: number, y: number, w: number, h: number, label: string, isOn: b
   `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${isOn ? LIT : 'none'}" stroke="${isOn ? LIT : DARK}" stroke-width="1.2"/>
   ${text(x + w / 2, y + h / 2 + size * 0.36, size, isOn ? GROUND : DIM, label, { anchor: 'middle', face: 'sans', weight: 800, spacing: 0.6 })}`
 
-const alert = (x: number, y: number, w: number, h: number, isOn: boolean, size = 9): string =>
-  `<g>${lamp(x, y, w, h, 'LIMIT ALERT ／ 限界警報', isOn, size)}${isOn ? BLINK : ''}</g>`
+const alert = (x: number, y: number, w: number, h: number, isOn: boolean, size = 9, label = 'LIMIT ALERT ／ 限界警報'): string =>
+  `<g>${lamp(x, y, w, h, label, isOn, size)}${isOn ? BLINK : ''}</g>`
 
 // 上辺の右と下辺の左を斜めに落とした外枠
 const plate = (w: number, h: number, cut: number): string =>
@@ -498,11 +498,34 @@ const stripModule = (panel: Panel, x: number, y: number): string => {
 </g>`, panel.tone)
 }
 
+// 狭い幅で縦に積むための小型のタイマー。原寸の6割ほどの高さに詰める。
+// 段階の説明は見出しの右に寄せ、7セグメントを縮め、ランプと警報を最下段に1列で並べる
+const COMPACT_W = 400
+const COMPACT_H = 130
+const COMPACT_GAP = 10
+const DIGIT_SCALE = 0.78
+
+const compactModule = (panel: Panel, x: number, y: number): string => {
+  const lamps = panel.lamps.map(({ label, isOn }, i) => lamp(108 + i * 50, 108, 46, 14, label, isOn, 8)).join('')
+  const nameEnd = 10 + tagWidth(12, panel.name)
+  return recolor(`<g transform="translate(${x} ${y})">
+  ${plate(COMPACT_W, COMPACT_H, 14)}
+  ${tag(10, 8, 17, 12, LIT, GROUND, xml(panel.name))}
+  ${text(nameEnd + 8, 21, 11, LIT, panel.caption)}
+  ${text(390, 21, 9, DIM, xml(panel.footer), { anchor: 'end' })}
+  ${ring({ cx: 52, cy: 74, inner: 24, outer: 33 }, panel.ratio, panel.code, panel.ringValue, 12)}
+  <g filter="url(#glow)" transform="translate(110 32) scale(${DIGIT_SCALE})">${panel.digits(0, 0, 270 / DIGIT_SCALE)}</g>
+  ${annotate(114, 88, 124, 101, panel.note)}
+  ${lamps}
+  ${alert(310, 108, 80, 14, panel.isDanger, 8, '限界警報')}
+</g>`, panel.tone)
+}
+
 // パネルの座標系の幅。mediumは電脳ログと同じ600にして文字の大きさを揃える
 export const layoutWidth = (layout: Layout): number =>
-  layout === 'wide' ? SLOTS * MODULE_W + (SLOTS - 1) * GAP : layout === 'medium' ? STRIP_W : MODULE_W
+  layout === 'wide' ? SLOTS * MODULE_W + (SLOTS - 1) * GAP : layout === 'medium' ? STRIP_W : COMPACT_W
 
-// 3基のタイマーを並べる。wideは原寸3基を横に、mediumは横長の帯を縦に、narrowは原寸を縦に積む
+// 3基のタイマーを並べる。wideは原寸3基を横に、mediumは横長の帯を縦に、narrowは小型を縦に積む
 export const powerSvg = (
   limits: readonly Limit[],
   context: ContextGauge | null,
@@ -517,14 +540,14 @@ export const powerSvg = (
       ? MODULE_H
       : layout === 'medium'
         ? SLOTS * STRIP_H + (SLOTS - 1) * STRIP_GAP
-        : SLOTS * MODULE_H + (SLOTS - 1) * GAP
+        : SLOTS * COMPACT_H + (SLOTS - 1) * COMPACT_GAP
   const modules = panels
     .map((panel, i) =>
       layout === 'wide'
         ? timerModule(panel, i * (MODULE_W + GAP), 0)
         : layout === 'medium'
           ? stripModule(panel, 0, i * (STRIP_H + STRIP_GAP))
-          : timerModule(panel, 0, i * (MODULE_H + GAP)),
+          : compactModule(panel, 0, i * (COMPACT_H + COMPACT_GAP)),
     )
     .join('')
   const size = svgSize(drawWidth, width, height)

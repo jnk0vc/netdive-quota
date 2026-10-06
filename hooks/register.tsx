@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, Timer } from 'claude-code'
 
-import type { Alarm, ContextGauge, Limit, LogEntry, UnitName, Units, Verdict } from '../types'
-import { UNIT_LABEL, UNIT_NAMES, VERDICT_COLOR, VERDICT_TEXT, boardSvg, elapsed, logRowsFor } from './board'
+import type { Alarm, ContextGauge, Escort, Limit, LogEntry, MemoryMap, UnitName, Units, Verdict } from '../types'
+import { UNIT_LABEL, UNIT_NAMES, VERDICT_COLOR, VERDICT_TEXT, boardSvg, elapsed, escortsShown, logRowsFor, shortModel } from './board'
 import { AMBER, GREEN, MOSS, RED, VOID, clip, drawWidthOf, layoutOf, paneHeightOf } from './palette'
 import { critical, labelOf, powerRows, powerSvg, resetIn } from './power'
+import { vitalsRows, vitalsSvg } from './vitals'
 
 const PANE = 'netdive-monitor'
 const TITLE = 'NETDIVE QUOTA'
@@ -25,6 +26,19 @@ const context = atom({ plugin: 'netdive-quota', key: 'context' } as const, null)
 // 書き換えるとタイマーのSVGが描き直されるため、頻度を上げるとチラつく
 const anchor = atom({ plugin: 'netdive-quota', key: 'anchor' } as const, 0)
 const REANCHOR_MS = 10 * 60_000
+// 随伴機(サブエージェント)。古いものから捨て、直近8機まで持つ
+const escorts = atom({ plugin: 'netdive-quota', key: 'escorts' } as const, [])
+// セッションの累計コスト(USD)。コストの台帳がない環境ではnull
+const cost = atom({ plugin: 'netdive-quota', key: 'cost' } as const, null)
+const tokens = atom({ plugin: 'netdive-quota', key: 'tokens' } as const, {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  turns: 0,
+})
+// コンテキストの内訳。応答のたびにローカルの見積もり(summary)で取り直す
+const memory = atom({ plugin: 'netdive-quota', key: 'memory' } as const, null)
 
 // 読む・探すはSCOUT(索敵)、書くはREWRITE(改竄)、実行とそれ以外はDIVE(潜入)が受け持つ
 const READERS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'LSP', 'ToolSearch']
@@ -47,6 +61,29 @@ const toLimits = (windows: readonly Limit[]): Limit[] =>
 
 const toContext = ({ tokens, window, percent }: ContextGauge): ContextGauge => ({ tokens, window, percent })
 
+type Breakdown = {
+  categories: readonly { name: string; tokens: number; kind: MemoryMap['slices'][number]['kind'] }[]
+  totalTokens: number
+  rawMaxTokens: number
+  percentage: number
+}
+
+// 遅延読み込みのツール定義は窓に数えないので外す
+const toMemory = (breakdown: Breakdown | undefined): MemoryMap | null =>
+  breakdown === undefined
+    ? null
+    : {
+        slices: breakdown.categories
+          .filter(one => one.kind !== 'deferred')
+          .map(({ name, tokens: count, kind }) => ({ name, tokens: count, kind })),
+        used: breakdown.totalTokens,
+        max: breakdown.rawMaxTokens,
+        percentage: breakdown.percentage,
+      }
+
+const settle = (list: readonly Escort[], matches: (one: Escort) => boolean, verdict: Verdict): Escort[] =>
+  list.map(one => (matches(one) && one.verdict === 'running' ? { ...one, verdict } : one))
+
 export const register: Register = on => {
   let anchorTimer: Timer | undefined
 
@@ -58,6 +95,9 @@ export const register: Register = on => {
     }
     await update($, limits, () => toLimits(usage.rateLimits))
     await update($, context, () => toContext(usage.context))
+    await update($, cost, () => usage.cost?.usd ?? null)
+    const measured = await $.session.usage({ breakdown: 'summary' })
+    await update($, memory, () => toMemory(measured.context.breakdown))
     const at = await $.clock.now()
     await update($, anchor, () => at)
     anchorTimer?.cancel()
@@ -79,8 +119,58 @@ export const register: Register = on => {
       if (isContextMoved) await update($, context, () => toContext(e.context))
       await update($, anchor, () => at)
     }
+    if (e.changed.includes('cost')) {
+      await update($, cost, () => e.cost?.usd ?? null)
+    }
+    // 内訳はローカルの見積もりで、トークン数の計算リクエストは送らない
+    if (isContextMoved) {
+      const measured = await $.session.usage({ breakdown: 'summary' })
+      await update($, memory, () => toMemory(measured.context.breakdown))
+    }
 
     return next(e)
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const spawned = await next(e)
+    const id = spawned.agentId
+    if (id !== undefined) {
+      const escort: Escort = {
+        id,
+        toolUseId: e.tool_use_id,
+        type: e.subagentType,
+        description: e.description,
+        model: spawned.model ?? e.model ?? e.parentModel,
+        verdict: 'running',
+        count: 0,
+        isBackground: e.background,
+      }
+      await update($, escorts, list => [...list, escort].slice(-8))
+    }
+
+    return spawned
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    const usage = done.usage ?? e.usage
+    if (usage !== undefined) {
+      await update($, tokens, all => ({
+        input: all.input + usage.input_tokens,
+        output: all.output + usage.output_tokens,
+        cacheRead: all.cacheRead + usage.cache_read_input_tokens,
+        cacheWrite: all.cacheWrite + usage.cache_creation_input_tokens,
+        turns: all.turns + 1,
+      }))
+    }
+    // 随伴機のターンが終わったら、その機体の作業は終わり
+    const agentId = e.agentId
+    if (agentId !== undefined) {
+      const verdict: Verdict = e.reason === 'answer' ? 'approved' : 'denied'
+      await update($, escorts, list => settle(list, one => one.id === agentId, verdict))
+    }
+
+    return done
   })
 
   on('command.run', { command: 'netdive' }, async $ => {
@@ -101,6 +191,7 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const unit = unitOf(e.tool)
     const isBash = e.tool === 'Bash'
+    const agentId = arg(e, 'agentId') || undefined
     const entry: LogEntry = {
       id: e.tool_use_id,
       at: await $.clock.now(),
@@ -108,6 +199,10 @@ export const register: Register = on => {
       tool: e.tool,
       summary: summarize(e),
       verdict: 'running',
+      agentId,
+    }
+    if (agentId !== undefined) {
+      await update($, escorts, list => list.map(one => (one.id === agentId ? { ...one, count: one.count + 1 } : one)))
     }
     await update($, units, all => ({
       ...all,
@@ -135,6 +230,12 @@ export const register: Register = on => {
       if (isBash) {
         await update($, bash, () => null)
       }
+      // 前面で動く随伴機は、起動したAgentツールが返った時点で作業を終えている
+      if (e.tool === 'Agent') {
+        await update($, escorts, list =>
+          settle(list, one => one.toolUseId === entry.id && !one.isBackground, verdict),
+        )
+      }
     }
   })
 
@@ -146,12 +247,18 @@ export const register: Register = on => {
     const windows = await read($, limits)
     const gauge = await read($, context)
     const at = (await read($, anchor)) || (await $.clock.now())
+    const squad = await read($, escorts)
+    const spent = await read($, cost)
+    const tally = await read($, tokens)
+    const map = await read($, memory)
+    const now = await $.clock.now()
     const isDiving = (Object.values(state) as Units[UnitName][]).some(one => one.verdict === 'running')
     const decision: Verdict = isDiving ? 'running' : (list.at(-1)?.verdict ?? 'idle')
 
     // Svgのないターミナルでは、利用枠と3班の状況と記録を燐光の緑の文字で並べる
     if (e.surface === 'terminal') {
-      const room = Math.max(4, (e.viewport?.rows ?? 40) - 12 - windows.length)
+      const shown = escortsShown(squad)
+      const room = Math.max(4, (e.viewport?.rows ?? 40) - 15 - windows.length - shown.length)
       return (
         <Box flexDirection="column">
           {powerRows(windows, gauge, at).map(row => (
@@ -159,12 +266,20 @@ export const register: Register = on => {
               {row.text}
             </Text>
           ))}
+          {vitalsRows(spent, tally, map, origin, now).map(row => (
+            <Text color={GREEN}>{row}</Text>
+          ))}
           <Text color={GREEN} bold>
             ▌作業班トレース ── 状況 {VERDICT_TEXT[decision]}
           </Text>
           {UNIT_NAMES.map(name => (
             <Text color={VERDICT_COLOR[state[name].verdict]}>
               {`${name}・${UNIT_LABEL[name]} ${VERDICT_TEXT[state[name].verdict]} ${state[name].tool}`}
+            </Text>
+          ))}
+          {shown.map(one => (
+            <Text color={VERDICT_COLOR[one.verdict]} wrap="truncate-end">
+              {`随伴機 ${one.type}「${one.description}」 ${VERDICT_TEXT[one.verdict]} ${shortModel(one.model)} ×${one.count}`}
             </Text>
           ))}
           <Text color={GREEN} bold>
@@ -184,8 +299,9 @@ export const register: Register = on => {
     const drawWidth = drawWidthOf(e.props.bodyColumns)
     const layout = layoutOf(drawWidth)
     const power = powerSvg(windows, gauge, at, layout, drawWidth)
-    const rows = logRowsFor(layout, drawWidth, paneHeightOf(e.props.scroll.bodyRows), power.height)
-    const board = boardSvg(state, decision, list, origin, layout, drawWidth, rows)
+    const vitals = vitalsSvg(spent, tally, map, origin, now, layout, drawWidth)
+    const rows = logRowsFor(layout, drawWidth, paneHeightOf(e.props.scroll.bodyRows), power.height + vitals.height, squad)
+    const board = boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows)
     return (
       <Box flexDirection="column" backgroundColor={VOID}>
         <Svg
@@ -196,6 +312,12 @@ export const register: Register = on => {
             .map(row => row.text)
             .join(' / ')}`}
           isInteractive
+        />
+        <Svg
+          source={vitals.source}
+          width={vitals.width}
+          height={vitals.height}
+          alt={`電脳バイタル: ${vitalsRows(spent, tally, map, origin, now).join(' / ')}`}
         />
         <Svg
           source={board.source}

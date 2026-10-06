@@ -1,4 +1,4 @@
-import type { LogEntry, UnitName, Units, Verdict } from '../types'
+import type { Escort, LogEntry, UnitName, Units, Verdict } from '../types'
 import { AMBER, CYAN, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
 import type { Layout } from './palette'
 
@@ -27,21 +27,53 @@ export const elapsed = (from: number, at: number): string => {
 
 // ── 作業班トレース ────────────────────────────────────────
 // 3班を横長のレーンに並べ、ツールの実行を1回1列で打刻する。右端が最新。
-// 列の下に通し番号の目盛りを振り、欄外にシアンで班の受け持ちを注釈する
+// その下に随伴機(サブエージェント)のレーンを足し、その機体が行った実行を同じ列に重ねて打刻する。
+// 列の下に通し番号の目盛りを振り、欄外にシアンで受け持ちを注釈する
 
 const LANE_TOP = 46
 const LANE_H = 40
 const STEP = 12
-const TAPE_Y = LANE_TOP + 3 * LANE_H
-export const TRACE_H = TAPE_Y + 74
+// 随伴機のレーンの上の見出し行の高さ
+const ESCORT_HEAD = 22
+const ESCORT_SLOTS = 3
 
 const NOTES = [
   '※1 索敵＝読み取り（Read・Grep・Glob ほか）',
   '　  改竄＝書き換え（Edit・Write）／潜入＝実行（Bash ほか）',
   '※2 1列が1回の実行。右端が最新で、点滅は実行中',
+  '※3 随伴機＝サブエージェント。その実行は班のレーンにも打刻',
 ]
 
-const trace = (state: Units, decision: Verdict, list: readonly LogEntry[], width: number): string => {
+// 実行中の機体を先に、そのあとに新しい順で、最大3機を出す
+export const escortsShown = (escorts: readonly Escort[]): Escort[] =>
+  [...escorts]
+    .reverse()
+    .sort((a, b) => Number(b.verdict === 'running') - Number(a.verdict === 'running'))
+    .slice(0, ESCORT_SLOTS)
+
+const tapeY = (escortCount: number): number => LANE_TOP + 3 * LANE_H + ESCORT_HEAD + escortCount * LANE_H
+
+export const traceHeight = (escortCount: number): number => tapeY(escortCount) + 30 + NOTES.length * 14
+
+// claude-haiku-4-5-20251001 → haiku-4-5
+export const shortModel = (model: string): string => model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+
+type Lane = {
+  label: string
+  english: string
+  isEscort: boolean
+  verdict: Verdict
+  detail: string
+  hits: (one: LogEntry) => boolean
+}
+
+const trace = (
+  state: Units,
+  decision: Verdict,
+  list: readonly LogEntry[],
+  escorts: readonly Escort[],
+  width: number,
+): string => {
   const labelW = 86
   const statusW = width >= 500 ? 128 : 100
   const trackX = labelW
@@ -52,28 +84,61 @@ const trace = (state: Units, decision: Verdict, list: readonly LogEntry[], width
   // 右詰めにするため、まだ埋まっていない列の数だけずらす
   const shift = columns - recent.length
   const columnX = (i: number) => trackX + (shift + i) * STEP
+  const shown = escortsShown(escorts)
+  const tapeTop = tapeY(shown.length)
+  const escortTop = LANE_TOP + 3 * LANE_H + ESCORT_HEAD
 
-  const lanes = UNIT_NAMES.map((name, row) => {
-    const y = LANE_TOP + row * LANE_H
-    const unit = state[name]
-    const color = VERDICT_COLOR[unit.verdict]
+  const unitLanes: Lane[] = UNIT_NAMES.map(name => ({
+    label: UNIT_LABEL[name],
+    english: name,
+    isEscort: false,
+    verdict: state[name].verdict,
+    detail: `${clip(state[name].tool || '------', 12)}${state[name].count ? ` ×${state[name].count}` : ''}`,
+    hits: one => one.unit === name,
+  }))
+  const escortLanes: Lane[] = shown.map(escort => ({
+    label: clip(escort.type, 10),
+    english: clip(escort.description, 9),
+    isEscort: true,
+    verdict: escort.verdict,
+    detail: `${clip(shortModel(escort.model), 12)}${escort.count ? ` ×${escort.count}` : ''}`,
+    hits: one => one.agentId === escort.id,
+  }))
+
+  const lane = (one: Lane, y: number): string => {
+    const color = VERDICT_COLOR[one.verdict]
     const marks = recent
-      .map((one, i) => {
-        if (one.unit !== name) return ''
+      .map((entry, i) => {
+        if (!one.hits(entry)) return ''
         const pulse =
-          one.verdict === 'running'
+          entry.verdict === 'running'
             ? '<animate attributeName="opacity" values="1;0.25;1" dur="0.7s" repeatCount="indefinite"/>'
             : ''
-        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[one.verdict]}">${pulse}</rect>`
+        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[entry.verdict]}">${pulse}</rect>`
       })
       .join('')
-    return `${tag(0, y + 4, 18, 12, GREEN, VOID, UNIT_LABEL[name])}
-  ${text(0, y + 34, 8, MOSS, name, { face: 'sans', weight: 800, spacing: 1.2 })}
+    // 班の名前は反転表示、随伴機の名前は縁取りだけにして区別する
+    const label = one.isEscort
+      ? `<rect x="0" y="${y + 4}" width="${labelW - 8}" height="18" fill="none" stroke="${GREEN}" stroke-width="1"/>${text(5, y + 17, 9, GREEN, xml(one.label), { face: 'sans', weight: 800, spacing: 0.4 })}
+  ${text(0, y + 34, 8, MOSS, xml(one.english))}`
+      : `${tag(0, y + 4, 18, 12, GREEN, VOID, one.label)}
+  ${text(0, y + 34, 8, MOSS, one.english, { face: 'sans', weight: 800, spacing: 1.2 })}`
+    return `${label}
   <line x1="${trackX}" y1="${y + LANE_H / 2 - 2}" x2="${trackX + columns * STEP}" y2="${y + LANE_H / 2 - 2}" stroke="${MOSS}" stroke-width="1" stroke-dasharray="1 3"/>
   <g filter="url(#glow)">${marks}</g>
-  ${text(width, y + 18, 14, color, VERDICT_TEXT[unit.verdict], { anchor: 'end', weight: 800 })}
-  ${text(width, y + 32, 9, unit.verdict === 'idle' ? MOSS : PAPER, `${xml(clip(unit.tool || '------', 12))}${unit.count ? ` ×${unit.count}` : ''}`, { anchor: 'end', face: 'mono', weight: 500 })}`
-  }).join('')
+  ${text(width, y + 18, 14, color, VERDICT_TEXT[one.verdict], { anchor: 'end', weight: 800 })}
+  ${text(width, y + 32, 9, one.verdict === 'idle' ? MOSS : PAPER, xml(one.detail), { anchor: 'end', face: 'mono', weight: 500 })}`
+  }
+
+  const lanes = [
+    ...unitLanes.map((one, row) => lane(one, LANE_TOP + row * LANE_H)),
+    ...escortLanes.map((one, row) => lane(one, escortTop + row * LANE_H)),
+  ].join('')
+  const escortHead = `${text(0, escortTop - 7, 10, GREEN, '随伴機', { weight: 800 })}
+  ${text(36, escortTop - 7, 7, MOSS, 'ESCORTS', { face: 'sans', weight: 800, spacing: 1.2 })}
+  ${text(trackX, escortTop - 7, 9, CYAN, '※3', { weight: 700 })}
+  ${text(width, escortTop - 7, 9, MOSS, escorts.length === 0 ? '出撃なし' : `出撃 ${escorts.length}機`, { anchor: 'end' })}
+  <line x1="0" y1="${escortTop - 3}" x2="${width}" y2="${escortTop - 3}" stroke="${MOSS}" stroke-dasharray="2 3"/>`
 
   // 通し番号の目盛り。5回ごとに長い目盛りと番号を付ける
   const tape = Array.from({ length: columns }, (_, c) => {
@@ -81,23 +146,28 @@ const trace = (state: Units, decision: Verdict, list: readonly LogEntry[], width
     const seq = i >= 0 ? total - (recent.length - 1 - i) : undefined
     const x = trackX + c * STEP + STEP / 2
     const isMajor = seq !== undefined && seq % 5 === 0
-    return `<line x1="${x}" y1="${TAPE_Y}" x2="${x}" y2="${TAPE_Y + (isMajor ? 8 : 4)}" stroke="${MOSS}" stroke-width="1"/>${
-      isMajor ? text(x, TAPE_Y + 18, 8, MOSS, `#${seq}`, { anchor: 'middle', face: 'mono', weight: 500 }) : ''
+    return `<line x1="${x}" y1="${tapeTop}" x2="${x}" y2="${tapeTop + (isMajor ? 8 : 4)}" stroke="${MOSS}" stroke-width="1"/>${
+      isMajor ? text(x, tapeTop + 18, 8, MOSS, `#${seq}`, { anchor: 'middle', face: 'mono', weight: 500 }) : ''
     }`
   }).join('')
 
   const title = tagWidth(13, '作業班トレース')
-  const notes = NOTES.map((one, i) => text(14, TAPE_Y + 34 + i * 14, 10, CYAN, one, { weight: 600 })).join('')
+  const notes = NOTES.map((one, i) => text(14, tapeTop + 34 + i * 14, 10, CYAN, one, { weight: 600 })).join('')
+  const escortFrame = shown.length
+    ? `<rect x="${trackX - 4}" y="${escortTop}" width="${columns * STEP + 8}" height="${shown.length * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>`
+    : ''
   return `${tag(0, 4, 20, 13, GREEN, VOID, '作業班トレース')}
   ${text(title + 4, 12, 9, CYAN, '※1', { weight: 700 })}
   ${text(title + 26, 20, 8, MOSS, 'UNIT TRACE', { face: 'sans', weight: 800, spacing: 1.5 })}
   ${text(width, 21, 15, VERDICT_COLOR[decision], `状況　${VERDICT_TEXT[decision]}`, { anchor: 'end', weight: 800 })}
   <line x1="0" y1="32" x2="${width}" y2="32" stroke="${MOSS}"/>
   <rect x="${trackX - 4}" y="${LANE_TOP - 2}" width="${columns * STEP + 8}" height="${3 * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>
+  ${escortFrame}
+  ${escortHead}
   ${lanes}
   ${tape}
   ${text(trackX + columns * STEP + 4, LANE_TOP - 6, 7, MOSS, 'LATEST ▾', { anchor: 'end', face: 'sans', weight: 800, spacing: 1 })}
-  <polyline points="6,${LANE_TOP + 3 * LANE_H - 4} 6,${TAPE_Y + 30} 10,${TAPE_Y + 30}" fill="none" stroke="${CYAN}" stroke-width="1"/>
+  <polyline points="6,${tapeTop + 4} 6,${tapeTop + 30} 10,${tapeTop + 30}" fill="none" stroke="${CYAN}" stroke-width="1"/>
   ${notes}`
 }
 
@@ -134,15 +204,16 @@ const log = (list: readonly LogEntry[], origin: number, width: number, rows: num
 // 座標系の幅。中くらい・狭いときは電脳ログの文字が読める大きさになる幅にする
 const BOARD_W: Record<Layout, number> = { wide: 1228, medium: 600, narrow: 400 }
 
-type Frame = { traceW: number; logX: number; logY: number; logW: number }
+type Frame = { traceW: number; traceH: number; logX: number; logY: number; logW: number }
 
-const frameOf = (layout: Layout): Frame => {
+const frameOf = (layout: Layout, escortCount: number): Frame => {
   const width = BOARD_W[layout]
+  const traceH = traceHeight(escortCount)
   if (layout === 'wide') {
     const traceW = 640
-    return { traceW, logX: 8 + traceW + 24, logY: 4, logW: width - traceW - 40 }
+    return { traceW, traceH, logX: 8 + traceW + 24, logY: 4, logW: width - traceW - 40 }
   }
-  return { traceW: width - 16, logX: 8, logY: TRACE_H + 16, logW: width - 16 }
+  return { traceW: width - 16, traceH, logX: 8, logY: traceH + 16, logW: width - 16 }
 }
 
 const LOG_HEAD = 56
@@ -152,32 +223,39 @@ export const boardSvg = (
   state: Units,
   decision: Verdict,
   list: readonly LogEntry[],
+  escorts: readonly Escort[],
   origin: number,
   layout: Layout,
   drawWidth: number,
   rows: number,
 ): { source: string; width: number; height: number } => {
   const width = BOARD_W[layout]
-  const { traceW, logX, logY, logW } = frameOf(layout)
+  const { traceW, traceH, logX, logY, logW } = frameOf(layout, escortsShown(escorts).length)
   const logH = LOG_HEAD + rows * ROW_H
-  const height = layout === 'wide' ? Math.max(TRACE_H + 8, logY + logH) : logY + logH
+  const height = layout === 'wide' ? Math.max(traceH + 8, logY + logH) : logY + logH
   const size = svgSize(drawWidth, width, height)
   const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${size.width}" height="${size.height}" style="background:${VOID}">
   <rect width="${width}" height="${height}" fill="${VOID}"/>
   <defs>${crtDefs()}</defs>
-  <g transform="translate(8 4)">${trace(state, decision, list, traceW)}</g>
+  <g transform="translate(8 4)">${trace(state, decision, list, escorts, traceW)}</g>
   <g transform="translate(${logX} ${logY})">${log(list, origin, logW, rows)}</g>
   ${scanlines(width, height)}
 </svg>`
   return { source, ...size }
 }
 
-// 電脳ログに何行出すか。パネルの残りの高さを埋める行数にする
-export const logRowsFor = (layout: Layout, drawWidth: number, paneHeight: number, powerHeight: number): number => {
+// 電脳ログに何行出すか。パネルの残りの高さ(タイマーと計器の下)を埋める行数にする
+export const logRowsFor = (
+  layout: Layout,
+  drawWidth: number,
+  paneHeight: number,
+  aboveHeight: number,
+  escorts: readonly Escort[],
+): number => {
   const scale = drawWidth / BOARD_W[layout]
-  const { logY } = frameOf(layout)
-  const room = (paneHeight - powerHeight) / scale - logY - LOG_HEAD
+  const { traceH, logY } = frameOf(layout, escortsShown(escorts).length)
+  const room = (paneHeight - aboveHeight) / scale - logY - LOG_HEAD
   const fit = Math.floor(room / ROW_H)
-  const least = layout === 'wide' ? Math.ceil((TRACE_H - LOG_HEAD) / ROW_H) : 6
+  const least = layout === 'wide' ? Math.ceil((traceH - LOG_HEAD) / ROW_H) : 6
   return Math.max(least, Math.min(40, fit))
 }
