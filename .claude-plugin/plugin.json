@@ -1,0 +1,14 @@
+{
+  "name": "netdive-quota",
+  "version": "0.2.0",
+  "description": "A phosphor-green net-dive monitor side pane: segmented ring quota timers, an annotated three-lane unit trace, and a warning band, all following this session",
+  "author": {
+    "name": "Jank0vic",
+    "url": "https://github.com/jnk0vc"
+  },
+  "homepage": "https://github.com/jnk0vc/netdive-quota",
+  "repository": "https://github.com/jnk0vc/netdive-quota",
+  "license": "MIT",
+  "keywords": ["status", "rate-limit", "context-window", "pane", "cyberpunk"],
+  "types": "./types/index.d.ts"
+}

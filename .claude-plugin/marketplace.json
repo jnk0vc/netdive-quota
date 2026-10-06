@@ -1,0 +1,21 @@
+{
+  "name": "netdive-quota",
+  "description": "Phosphor-green net-dive monitor for Claude Code: segmented ring quota timers and an annotated unit trace in the side pane",
+  "owner": {
+    "name": "Jank0vic",
+    "url": "https://github.com/jnk0vc"
+  },
+  "plugins": [
+    {
+      "name": "netdive-quota",
+      "source": "./",
+      "description": "A phosphor-green net-dive monitor side pane: segmented ring quota timers, an annotated three-lane unit trace, and a warning band, all following this session",
+      "version": "0.2.0",
+      "author": {
+        "name": "Jank0vic",
+        "url": "https://github.com/jnk0vc"
+      },
+      "license": "MIT"
+    }
+  ]
+}
