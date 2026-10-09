@@ -1,11 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, Timer } from 'claude-code'
 
-import type { Alarm, ContextGauge, Escort, Limit, LogEntry, MemoryMap, UnitName, Units, Verdict } from '../types'
+import type { Alarm, ContextGauge, Escort, Limit, LogEntry, MemoryMap, TokenTally, UnitName, Units, Verdict } from '../types'
 import { UNIT_LABEL, UNIT_NAMES, VERDICT_COLOR, VERDICT_TEXT, boardSvg, elapsed, escortsShown, logRowsFor, shortModel } from './board'
 import { AMBER, GREEN, MOSS, RED, VOID, clip, drawWidthOf, layoutOf, paneHeightOf } from './palette'
-import { critical, labelOf, memoryFrom, powerRows, powerSvg, resetIn } from './power'
-import { vitalsRow, vitalsSvg } from './vitals'
+import { NO_POWER, critical, labelOf, memoryFrom, powerRows, powerSvg, resetIn, shownOf } from './power'
+import type { PowerShown } from './power'
+import { NO_VITALS, vitalsRow, vitalsSvg } from './vitals'
+import type { VitalsShown } from './vitals'
 
 const PANE = 'netdive-monitor'
 const TITLE = 'NETDIVE QUOTA'
@@ -84,8 +86,44 @@ const toMemory = (breakdown: Breakdown | undefined): MemoryMap | null =>
 const settle = (list: readonly Escort[], matches: (one: Escort) => boolean, verdict: Verdict): Escort[] =>
   list.map(one => (matches(one) && one.verdict === 'running' ? { ...one, verdict } : one))
 
+// ── SVGの作り直しの制御 ─────────────────────────────────────
+// ホストは、SVGの文字列が1文字でも変わると読み込み直し、動きを頭から再生し直す(チラつく)。
+// そこで、表示する内容が変わらない限り、前に作ったSVGをそのまま返す。
+// 数え上げの起点には、そのとき表示していた数値を持っておく
+
+// altも作ったときの文字で持つ。描くたびの時刻で作り直すと(経費のペースが毎回変わる)、SVGごと描き直しになる
+type Drawn = { source: string; width: number; height: number; alt?: string }
+type Built<S> = { key: string; drawn: Drawn; shown: S }
+
+// 動きの分だけ文字列が長くなる。ホストの上限(131072文字)に近づいたら、動きをやめて作り直す
+const SOURCE_LIMIT = 125_000
+
+function rebuild<S>(
+  cache: Map<string, Built<S>>,
+  slot: string,
+  key: string,
+  shown: S,
+  make: (previous: S | undefined, hasMotion: boolean) => Drawn,
+): Drawn {
+  const hit = cache.get(slot)
+  if (hit?.key === key) return hit.drawn
+  let drawn = make(hit?.shown, true)
+  if (drawn.source.length > SOURCE_LIMIT) drawn = make(hit?.shown, false)
+  cache.set(slot, { key, drawn, shown })
+  return drawn
+}
+
+// 1回のモデル要求(turn.step)で使ったトークン。ターンの終わりに、足し済みの分を引くために覚えておく
+type Spent = Pick<TokenTally, 'input' | 'output' | 'cacheRead' | 'cacheWrite'>
+const STEPPED_LIMIT = 64
+
 export const register: Register = on => {
   let anchorTimer: Timer | undefined
+  const powers = new Map<string, Built<PowerShown>>()
+  const vitalsMap = new Map<string, Built<VitalsShown>>()
+  // 作業班トレースと電脳ログは、前に描いたときの最新のログidを覚える
+  const boards = new Map<string, Built<string | undefined>>()
+  const stepped = new Map<string, Spent>()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'netdive', description: '電脳監視パネルを開く' })
@@ -151,15 +189,47 @@ export const register: Register = on => {
     return spawned
   })
 
-  on('turn.complete', async ($, e, next) => {
-    const done = await next(e)
-    const usage = done.usage ?? e.usage
-    if (usage !== undefined) {
+  // モデルへの要求(ステップ)が返るたびに、使ったトークンを累計へ足す。
+  // ターンの終わりまで待たずに、交信量やキャッシュの数字が1回の要求ごとに増えていく。
+  // ターンのあいだに足した分は、ターンの終わりに引くために覚えておく
+  on('turn.step', async function* ($, e, next) {
+    const done = yield* next(e)
+    const usage = done.usage
+    if (usage !== null) {
+      const prior = stepped.get(e.turnId)
+      stepped.set(e.turnId, {
+        input: (prior?.input ?? 0) + usage.input_tokens,
+        output: (prior?.output ?? 0) + usage.output_tokens,
+        cacheRead: (prior?.cacheRead ?? 0) + usage.cache_read_input_tokens,
+        cacheWrite: (prior?.cacheWrite ?? 0) + usage.cache_creation_input_tokens,
+      })
+      // ターンの終わりが来ないまま残った分が溜まり続けないよう、古いものから捨てる
+      if (stepped.size > STEPPED_LIMIT) stepped.delete(stepped.keys().next().value!)
       await update($, tokens, all => ({
+        ...all,
         input: all.input + usage.input_tokens,
         output: all.output + usage.output_tokens,
         cacheRead: all.cacheRead + usage.cache_read_input_tokens,
         cacheWrite: all.cacheWrite + usage.cache_creation_input_tokens,
+      }))
+    }
+
+    return done
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    const usage = done.usage ?? e.usage
+    // ターンの使用量から、ステップごとに足し済みの分を引いた残りだけを足す。合計はターン単位で足していたときと同じになる
+    const counted = stepped.get(e.turnId)
+    stepped.delete(e.turnId)
+    if (usage !== undefined) {
+      const rest = (total: number, part = 0) => Math.max(0, total - part)
+      await update($, tokens, all => ({
+        input: all.input + rest(usage.input_tokens, counted?.input),
+        output: all.output + rest(usage.output_tokens, counted?.output),
+        cacheRead: all.cacheRead + rest(usage.cache_read_input_tokens, counted?.cacheRead),
+        cacheWrite: all.cacheWrite + rest(usage.cache_creation_input_tokens, counted?.cacheWrite),
         turns: all.turns + 1,
       }))
     }
@@ -174,9 +244,13 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'netdive' }, async $ => {
-    // 開き直したSVGは起点から数え始めるので、起点を今に合わせてから開く
+    // 開き直したSVGは起点から数え始めるので、起点を今に合わせてから開く。
+    // 経過時間の時計やペースも作った時点の時刻を起点にしているため、描いたSVGを捨てて作り直し、最初から数え上げる
     const at = await $.clock.now()
     await update($, anchor, () => at)
+    powers.clear()
+    vitalsMap.clear()
+    boards.clear()
     await $.ui.open({ id: PANE, title: TITLE })
 
     return { text: '電脳監視パネルを開きました。' }
@@ -297,10 +371,37 @@ export const register: Register = on => {
     const { Svg } = $.ui.resolve(e)
     const drawWidth = drawWidthOf(e.props.bodyColumns)
     const layout = layoutOf(drawWidth)
-    const power = powerSvg(windows, map, at, layout, drawWidth)
-    const vitals = vitalsSvg(spent, tally, origin, now, layout, drawWidth)
+    // 各SVGは、表示する内容(nowを除く入力)が前と同じなら、前に作った文字列をそのまま返す。
+    // 内容が変わったときだけ作り直し、数字は前に表示した値から数え上げる
+    const newest = list.at(-1)?.id
+    const power = rebuild(
+      powers,
+      `${e.surface}:power`,
+      JSON.stringify({ windows, map, at, layout, drawWidth }),
+      shownOf(windows, map),
+      (previous, hasMotion) =>
+        powerSvg(windows, map, at, layout, drawWidth, hasMotion ? { from: previous ?? NO_POWER, isBoot: previous === undefined } : undefined),
+    )
+    const vitals = rebuild(
+      vitalsMap,
+      `${e.surface}:vitals`,
+      JSON.stringify({ spent, tally, origin, layout, drawWidth }),
+      { cost: spent, tokens: tally },
+      (previous, hasMotion) => ({
+        ...vitalsSvg(spent, tally, origin, now, layout, drawWidth, hasMotion ? { from: previous ?? NO_VITALS, isBoot: previous === undefined } : undefined),
+        alt: vitalsRow(spent, tally, origin, now),
+      }),
+    )
     const rows = logRowsFor(layout, drawWidth, paneHeightOf(e.props.scroll.bodyRows), power.height + vitals.height, squad)
-    const board = boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows)
+    const board = rebuild(
+      boards,
+      `${e.surface}:board`,
+      JSON.stringify({ state, decision, list, squad, origin, layout, drawWidth, rows }),
+      newest,
+      // 最新のログが前に描いたときと同じ(判定だけが変わった)なら、打ち込み直さない
+      (previous, hasMotion) =>
+        boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows, hasMotion ? { now, freshId: newest !== previous ? newest : undefined } : undefined),
+    )
     return (
       <Box flexDirection="column" backgroundColor={VOID}>
         <Svg
@@ -316,7 +417,8 @@ export const register: Register = on => {
           source={vitals.source}
           width={vitals.width}
           height={vitals.height}
-          alt={`電脳バイタル: ${vitalsRow(spent, tally, origin, now)}`}
+          alt={`電脳バイタル: ${vitals.alt}`}
+          isInteractive
         />
         <Svg
           source={board.source}

@@ -12,6 +12,8 @@ export const MOSS = '#2F8F3A'
 export const PAPER = '#B9F5B0'
 // 方眼の線。地からわずかに浮く程度にする
 export const GRID = '#0A2A12'
+// 数字が着地した瞬間や、打刻の瞬間に光る白に近い緑
+export const FLASH = '#E8FFE0'
 
 // 日本語はゴシック体、英字の見出しはHelvetica系の太い大文字、ログは等幅で描く
 export const GOTHIC = "'Hiragino Kaku Gothic StdN','Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic','Noto Sans JP',sans-serif"
@@ -50,6 +52,10 @@ export const svgSize = (drawWidth: number, viewWidth: number, viewHeight: number
   height: Math.round((drawWidth * viewHeight) / viewWidth),
 })
 
+// 整数の桁(符号は付いていてよい)を3桁ごとにカンマで区切る。
+// ランタイムにはIntlもtoLocaleStringもないので手で区切る。小数部には使えない
+export const group = (digits: string): string => digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+
 export const xml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -58,6 +64,17 @@ export const clip = (text: string, max: number): string =>
 
 // 1文字の描画幅の見積もり。漢字・かな・全角記号は文字の大きさと同じ、英数字はその6割強とする
 const glyphWidth = (char: string, size: number): number => ((char.codePointAt(0) ?? 0) >= 0x2e80 ? size : size * 0.62)
+
+// 文字列の描画幅の見積もり。字間(letter-spacing)は1文字ごとに加わる
+export const textWidth = (body: string, size: number, spacing = 0): number =>
+  [...body].reduce((sum, char) => sum + glyphWidth(char, size) + spacing, 0)
+
+// 見積もった幅がfitを超えるときだけ、文字と字間を縮めてfitに収める属性を返す。
+// 桁が増えうる数字が、隣の文字やセルの外へはみ出さないようにする
+export const fitAttr = (body: string, size: number, spacing: number, fit: number | undefined): string =>
+  fit !== undefined && textWidth(body, size, spacing) > fit
+    ? ` textLength="${Math.floor(fit)}" lengthAdjust="spacingAndGlyphs"`
+    : ''
 
 // 表示幅がmaxWidthに収まるよう切り詰める。英語名は日本語より細いので、文字数で切ると収まる名前まで省略してしまう
 export const fitText = (text: string, size: number, maxWidth: number): string => {
@@ -77,19 +94,21 @@ export const fitText = (text: string, size: number, maxWidth: number): string =>
 
 export type Face = 'gothic' | 'sans' | 'mono'
 
-const FACES: Record<Face, string> = { gothic: GOTHIC, sans: SANS, mono: MONO }
+export const FACES: Record<Face, string> = { gothic: GOTHIC, sans: SANS, mono: MONO }
 
-type TextOptions = {
+export type TextOptions = {
   anchor?: 'start' | 'middle' | 'end'
   weight?: number
   face?: Face
   spacing?: number
+  // 桁が増えうる数字の幅の上限。見積もりがこれを超えるときだけ縮めて収める
+  fit?: number
 }
 
 export const text = (x: number, y: number, size: number, fill: string, body: string, options: TextOptions = {}): string => {
-  const { anchor = 'start', weight = 700, face = 'gothic', spacing = 0 } = options
+  const { anchor = 'start', weight = 700, face = 'gothic', spacing = 0, fit } = options
   const letter = spacing ? ` letter-spacing="${spacing}"` : ''
-  return `<text x="${x}" y="${y}" font-family="${FACES[face]}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}"${letter}>${body}</text>`
+  return `<text x="${x}" y="${y}" font-family="${FACES[face]}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}"${letter}${fitAttr(body, size, spacing, fit)}>${body}</text>`
 }
 
 // 反転表示のラベル箱。塗りつぶした箱に地の色で文字を抜く
@@ -105,7 +124,10 @@ export const tagWidth = (size: number, body: string, face: Face = 'gothic'): num
 export const crtDefs = (): string =>
   `<pattern id="scan" width="4" height="3" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#000" opacity="0.32"/></pattern>
   <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="${GRID}" stroke-width="1"/></pattern>
-  <filter id="glow" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
+  <filter id="glow" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  <linearGradient id="refresh" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${GREEN}" stop-opacity="0"/><stop offset="0.5" stop-color="${GREEN}" stop-opacity="0.07"/><stop offset="1" stop-color="${GREEN}" stop-opacity="0"/></linearGradient>`
 
+// 走査線に加えて、古いCRTのリフレッシュのように、淡い帯が7秒かけて画面の上から下へ流れる
 export const scanlines = (width: number, height: number): string =>
-  `<rect width="${width}" height="${height}" fill="url(#scan)" pointer-events="none"/>`
+  `<rect width="${width}" height="${height}" fill="url(#scan)" pointer-events="none"/>
+  <rect y="-60" width="${width}" height="60" fill="url(#refresh)" pointer-events="none"><animate attributeName="y" from="-60" to="${height}" dur="7s" repeatCount="indefinite"/></rect>`

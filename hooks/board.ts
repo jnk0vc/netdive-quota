@@ -1,5 +1,6 @@
 import type { Escort, LogEntry, UnitName, Units, Verdict } from '../types'
-import { AMBER, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
+import { ticker, tickerWidth } from './motion'
+import { AMBER, FLASH, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, textWidth, xml } from './palette'
 import type { Layout } from './palette'
 
 export const UNIT_LABEL: Record<UnitName, string> = { SCOUT: '索敵', REWRITE: '改竄', DIVE: '潜入' }
@@ -23,6 +24,90 @@ export const elapsed = (from: number, at: number): string => {
   const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
   const ss = String(seconds % 60).padStart(2, '0')
   return `T+${mm}:${ss}`
+}
+
+// 動きに使う、描画の時点の情報。nowは経過時間の時計の起点、freshIdは今回新しく増えた(打刻する)ログのid
+export type BoardMotion = { now: number; freshId?: string }
+
+// ── オシロスコープ ────────────────────────────────────────
+// 作業班トレースの見出しに、状況に応じた波形を流し続ける。
+// 1周期ぶんの波形を2周期つなげ、1周期ぶん左へずらすのを繰り返すと、切れ目なく右から左へ流れて見える。
+// 波形の両端は必ず中心線に置き、周期の継ぎ目が段差にならないようにする
+
+type Point = [number, number]
+
+const SCOPE_H = 18
+// 波形の箱の幅の上限。広い幅で見出しの空きいっぱいに流すと、パネルの中でいちばん目立ってしまう
+const SCOPE_MAX_W = 120
+
+const round1 = (n: number): number => +n.toFixed(1)
+
+// 動作中: 平らな線のあいだに、なめらかな波の短い束(交信の塊)が2つ流れる。振れ幅は約3.5
+const BURSTS = [
+  { from: 0.12, to: 0.42 },
+  { from: 0.62, to: 0.8 },
+]
+
+const burst = (period: number, mid: number): Point[] => {
+  const count = Math.max(2, Math.round(period / 2))
+  return Array.from({ length: count + 1 }, (_, i): Point => {
+    const at = i / count
+    const one = BURSTS.find(b => at > b.from && at < b.to)
+    if (one === undefined) return [round1(at * period), mid]
+    // 束の両端で振れ幅を0に落とし、平らな線へなめらかにつなぐ
+    const fade = Math.sin(((at - one.from) / (one.to - one.from)) * Math.PI)
+    return [round1(at * period), round1(mid + Math.sin((at * period * 2 * Math.PI) / 8) * 3.5 * fade)]
+  })
+}
+
+// 遮断: 平らな線に、ときおり鋭いスパイクが立つ
+const spiked = (period: number, mid: number): Point[] => {
+  const spike = (at: number, up: number, down: number): Point[] => [
+    [round1(at - 2), mid],
+    [round1(at), mid - up],
+    [round1(at + 2), mid + down],
+    [round1(at + 4), mid],
+  ]
+  return [[0, mid], ...spike(period * 0.3, 5, 3), ...spike(period * 0.74, 4, 2), [period, mid]]
+}
+
+// 平常: 振れ幅1ほどのさざ波に、1周期に1回、心拍のような山が立つ
+const RIPPLE = [0, 0.5, 1, 0.5, 0, -0.5, -1, -0.5]
+const BEAT: Point[] = [[-14, 0], [-11, -1], [-8, 0], [-3, 0], [-1, 1], [0, -5], [2, 3.5], [4, 0], [9, 0], [13, -1.5], [17, 0]]
+
+const calm = (period: number, mid: number): Point[] => {
+  const beat = period / 2
+  const count = Math.max(2, Math.round(period / 4))
+  const ripple = Array.from({ length: count + 1 }, (_, i): Point => {
+    if (i === 0 || i === count) return [i === 0 ? 0 : period, mid]
+    return [round1((i * period) / count), mid + RIPPLE[i % RIPPLE.length]!]
+  }).filter(([x]) => x < beat - 16 || x > beat + 20 || x === 0 || x === period)
+  const blip = BEAT.map(([dx, dy]): Point => [round1(beat + dx), mid + dy]).filter(([x]) => x > 0 && x < period)
+  return [...ripple, ...blip].sort((a, b) => a[0] - b[0])
+}
+
+// speedは流れる速さ(px/秒)。箱の幅で周期の秒数を決めると、広い箱ほど速く流れてしまう
+const WAVES: Record<Verdict, { color: string; speed: number; points: (period: number, mid: number) => Point[] }> = {
+  running: { color: AMBER, speed: 36, points: burst },
+  denied: { color: RED, speed: 24, points: spiked },
+  approved: { color: GREEN, speed: 18, points: calm },
+  idle: { color: GREEN, speed: 18, points: calm },
+}
+
+// 波形の箱。xは左端、yは上端、wは幅。1周期を箱の幅にする。clipPathのidはSVGの中で唯一にする
+const scope = (decision: Verdict, x: number, y: number, w: number): string => {
+  const { color, speed, points } = WAVES[decision]
+  const seconds = round1(w / speed)
+  const mid = y + SCOPE_H / 2
+  const period = points(w, mid)
+  // 2周期目は1周期目を右へw移す。継ぎ目の点は重なるので1つ省く
+  const [start, ...rest] = [...period, ...period.slice(1).map(([px, py]): Point => [round1(px + w), py])].map(
+    ([px, py]) => `${round1(px + x)},${py}`,
+  )
+  return `<clipPath id="scope-clip"><rect x="${x}" y="${y}" width="${w}" height="${SCOPE_H}"/></clipPath>
+  <rect x="${x}" y="${y}" width="${w}" height="${SCOPE_H}" fill="none" stroke="${MOSS}" stroke-width="1" stroke-dasharray="2 2"/>
+  <line x1="${x}" y1="${mid}" x2="${x + w}" y2="${mid}" stroke="${MOSS}" stroke-width="0.8" opacity="0.5"/>
+  <g clip-path="url(#scope-clip)"><path d="M${start} L${rest.join(' ')}" fill="none" stroke="${color}" stroke-width="1" stroke-linejoin="round" opacity="0.85"><animateTransform attributeName="transform" type="translate" from="0 0" to="${-w} 0" dur="${seconds}s" repeatCount="indefinite"/></path></g>`
 }
 
 // ── 作業班トレース ────────────────────────────────────────
@@ -67,6 +152,7 @@ const trace = (
   list: readonly LogEntry[],
   escorts: readonly Escort[],
   width: number,
+  motion?: BoardMotion,
 ): string => {
   const labelW = 86
   const statusW = width >= 500 ? 128 : 100
@@ -108,7 +194,12 @@ const trace = (
           entry.verdict === 'running'
             ? '<animate attributeName="opacity" values="1;0.25;1" dur="0.7s" repeatCount="indefinite"/>'
             : ''
-        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[entry.verdict]}">${pulse}</rect>`
+        // 今回増えた打刻は、白に近い緑が一瞬光ってから落ち着く
+        const glint =
+          i === recent.length - 1 && entry.id === motion?.freshId
+            ? `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${FLASH}" opacity="0.9"><animate attributeName="opacity" from="0.9" to="0" dur="0.5s" fill="freeze"/></rect>`
+            : ''
+        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[entry.verdict]}">${pulse}</rect>${glint}`
       })
       .join('')
     // 班の名前は反転表示、随伴機の名前は縁取りだけにして区別する
@@ -148,9 +239,16 @@ const trace = (
   const escortFrame = shown.length
     ? `<rect x="${trackX - 4}" y="${escortTop}" width="${columns * STEP + 8}" height="${shown.length * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>`
     : ''
+  // 見出しの「UNIT TRACE」と右寄せの「状況」のあいだの空きに、オシロスコープを置く。
+  // 両方の幅を見積もり、空きが48px未満なら置かない。幅はSCOPE_MAX_Wまでにして、「状況」の文字の左に寄せる
+  const status = `状況　${VERDICT_TEXT[decision]}`
+  const labelEnd = title + 8 + textWidth('UNIT TRACE', 8, 1.5)
+  const gap = width - textWidth(status, 15) - labelEnd
+  const scopeW = Math.min(SCOPE_MAX_W, Math.floor(gap - 16))
   return `${tag(0, 4, 20, 13, GREEN, VOID, '作業班トレース')}
   ${text(title + 8, 20, 8, MOSS, 'UNIT TRACE', { face: 'sans', weight: 800, spacing: 1.5 })}
-  ${text(width, 21, 15, VERDICT_COLOR[decision], `状況　${VERDICT_TEXT[decision]}`, { anchor: 'end', weight: 800 })}
+  ${gap < 48 ? '' : scope(decision, Math.round(labelEnd + 8 + Math.floor(gap - 16) - scopeW), 6, scopeW)}
+  ${text(width, 21, 15, VERDICT_COLOR[decision], status, { anchor: 'end', weight: 800 })}
   <line x1="0" y1="32" x2="${width}" y2="32" stroke="${MOSS}"/>
   <rect x="${trackX - 4}" y="${LANE_TOP - 2}" width="${columns * STEP + 8}" height="${3 * LANE_H}" fill="url(#grid)" stroke="${MOSS}" stroke-width="1"/>
   ${escortFrame}
@@ -162,29 +260,62 @@ const trace = (
 
 const ROW_H = 22
 
-// 電脳ログ。端末のコード表示のように等幅で並べ、幅に収まる文字数で対象を切り詰める
-const log = (list: readonly LogEntry[], origin: number, width: number, rows: number): string => {
-  const head = `${tag(0, 4, 20, 13, GREEN, VOID, '電脳ログ')}${text(width, 20, 8, MOSS, 'DIVE LOG', { anchor: 'end', face: 'sans', weight: 800, spacing: 1.5 })}
+// 列の左端。経過時刻は「T+120:00」の8文字まで入る幅を取る
+const UNIT_X = 70
+const VERDICT_X = 140
+const TOOL_X = 196
+// 等幅の1文字ぶんの幅。全角の文字だけは文字の大きさ(12px)いっぱいを取る
+const CHAR = 7.3
+const advanceOf = (char: string): number => ((char.codePointAt(0) ?? 0) >= 0x2e80 ? 12 : CHAR)
+
+// 最新の行の仕上げ。対象の文字のすぐ右に、点滅する緑の四角いカーソルを置く。
+// isFreshのとき(今回増えた行)は、さらに打ち込みの演出を重ねる。
+//   地の色の覆いが対象の左端から1文字ずつ右へ動いて文字を現し、先頭には緑のカーソルが付き、行は緑に光ってから消える。
+//   1文字あたり0.03秒で、全体は0.6秒までに収める。点滅のカーソルは打ち終わってから現れる
+const newestRow = (row: string, tool: string, summary: string, y: number, width: number, isFresh: boolean): string => {
+  // 各文字の手前の位置。最後は文字列の右端
+  let at = TOOL_X
+  const stops = [at, ...[...`${tool} ${summary}`].map(char => (at += advanceOf(char)))]
+  const typing = isFresh ? +(stops.length * Math.min(0.03, 0.6 / stops.length)).toFixed(2) : 0
+  const blink = `<rect x="${round1(at + 1)}" y="${y - 11}" width="${CHAR}" height="14" fill="${GREEN}"${isFresh ? ' visibility="hidden"' : ''}>${
+    isFresh ? `<set attributeName="visibility" to="visible" begin="${typing}s"/>` : ''
+  }<animate attributeName="opacity" calcMode="discrete" values="1;0" keyTimes="0;0.5" dur="1.1s"${isFresh ? ` begin="${typing}s"` : ''} repeatCount="indefinite"/></rect>`
+  if (!isFresh) return `${row}${blink}`
+  const move = `<animate attributeName="x" calcMode="discrete" values="${stops.map(round1).join(';')}" dur="${typing}s" fill="freeze"/>`
+  const highlight = `<rect x="0" y="${y - 15}" width="${width}" height="${ROW_H}" fill="${GREEN}" opacity="0.15"><animate attributeName="opacity" from="0.15" to="0" dur="0.8s" fill="freeze"/></rect>`
+  const cover = `<rect x="${TOOL_X}" y="${y - 13}" width="${width - TOOL_X}" height="19" fill="${VOID}">${move}</rect>`
+  const lead = `<rect x="${TOOL_X}" y="${y - 11}" width="${CHAR}" height="14" fill="${GREEN}">${move}<set attributeName="visibility" to="hidden" begin="${typing}s"/></rect>`
+  return `${highlight}${row}${cover}${lead}${blink}`
+}
+
+// 電脳ログ。端末のコード表示のように等幅で並べ、幅に収まる文字数で対象を切り詰める。
+// motionを渡すと、見出しに経過時間の時計を出し、今回増えた行を打ち込んで見せる
+const log = (list: readonly LogEntry[], origin: number, width: number, rows: number, motion?: BoardMotion): string => {
+  // 経過時間の時計は「DIVE LOG」の左に置く。起点(セッションの開始)が分からないときは出さない
+  const clock =
+    motion !== undefined && origin > 0
+      ? (() => {
+          const seconds = Math.max(0, Math.floor((motion.now - origin) / 1000))
+          return ticker(seconds, round1(width - textWidth('DIVE LOG', 8, 1.5) - 10 - tickerWidth(seconds, 11)), 20, 11, GREEN)
+        })()
+      : ''
+  const head = `${tag(0, 4, 20, 13, GREEN, VOID, '電脳ログ')}${text(width, 20, 8, MOSS, 'DIVE LOG', { anchor: 'end', face: 'sans', weight: 800, spacing: 1.5 })}${clock}
   <line x1="0" y1="32" x2="${width}" y2="32" stroke="${MOSS}"/>`
   if (list.length === 0) {
     return `${head}${text(0, 58, 12, MOSS, '接続記録なし。指示を入力すると、ツールの実行がここに記録されます。')}${text(0, 80, 12, GREEN, '&gt; _', { face: 'mono' })}`
   }
-  // 列の左端。経過時刻は「T+120:00」の8文字まで入る幅を取る
-  const UNIT_X = 70
-  const VERDICT_X = 140
-  const TOOL_X = 196
-  const CHAR = 7.3
   const room = Math.max(8, Math.floor((width - TOOL_X - 12) / CHAR))
-  const lines = list
-    .slice(-rows)
+  const shown = list.slice(-rows)
+  const lines = shown
     .map((one, i) => {
       const y = 54 + i * ROW_H
       const summary = clip(one.summary.replace(/\s+/g, ' '), room - one.tool.length - 1)
-      return `${text(0, y, 12, MOSS, elapsed(origin, one.at), { face: 'mono', weight: 500 })}
+      const row = `${text(0, y, 12, MOSS, elapsed(origin, one.at), { face: 'mono', weight: 500 })}
   ${text(UNIT_X, y, 12, GREEN, one.unit, { face: 'mono', weight: 700 })}
   ${text(VERDICT_X, y, 13, VERDICT_COLOR[one.verdict], VERDICT_TEXT[one.verdict], { weight: 800 })}
   ${text(TOOL_X, y, 12, GREEN, xml(one.tool), { face: 'mono', weight: 700 })}
   ${text(TOOL_X + one.tool.length * CHAR + CHAR, y, 12, PAPER, xml(summary), { face: 'mono', weight: 400 })}`
+      return i === shown.length - 1 ? newestRow(row, one.tool, summary, y, width, motion?.freshId === one.id) : row
     })
     .join('')
   return `${head}${lines}`
@@ -207,7 +338,8 @@ const frameOf = (layout: Layout, escortCount: number): Frame => {
 
 const LOG_HEAD = 56
 
-// wide: 作業班トレースの右に電脳ログ。medium・narrow: トレースの下に電脳ログ
+// wide: 作業班トレースの右に電脳ログ。medium・narrow: トレースの下に電脳ログ。
+// motionを渡すと、経過時間の時計と、新しい行の打ち込みと打刻の光を加える(オシロスコープと点滅のカーソルは常に動く)
 export const boardSvg = (
   state: Units,
   decision: Verdict,
@@ -217,6 +349,7 @@ export const boardSvg = (
   layout: Layout,
   drawWidth: number,
   rows: number,
+  motion?: BoardMotion,
 ): { source: string; width: number; height: number } => {
   const width = BOARD_W[layout]
   const { traceW, traceH, logX, logY, logW } = frameOf(layout, escortsShown(escorts).length)
@@ -226,8 +359,8 @@ export const boardSvg = (
   const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${size.width}" height="${size.height}" style="background:${VOID}">
   <rect width="${width}" height="${height}" fill="${VOID}"/>
   <defs>${crtDefs()}</defs>
-  <g transform="translate(8 4)">${trace(state, decision, list, escorts, traceW)}</g>
-  <g transform="translate(${logX} ${logY})">${log(list, origin, logW, rows)}</g>
+  <g transform="translate(8 4)">${trace(state, decision, list, escorts, traceW, motion)}</g>
+  <g transform="translate(${logX} ${logY})">${log(list, origin, logW, rows, motion)}</g>
   ${scanlines(width, height)}
 </svg>`
   return { source, ...size }

@@ -1,10 +1,32 @@
 import type { ContextGauge, Limit, MemoryMap, MemorySlice } from '../types'
-import { AMBER, CYAN, DARK, DIM, GREEN, GROUND, LIT, PAPER, VOID, crtDefs, fitText, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
+import { rollText } from './motion'
+import { AMBER, CYAN, DARK, DIM, GREEN, GROUND, LIT, PAPER, VOID, crtDefs, fitText, group, scanlines, svgSize, tag, tagWidth, text, xml } from './palette'
 import type { Layout } from './palette'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
 const SLOTS = 3
+
+// 数字の書式。kとMには丸めず、桁をすべて出す。Intlはないので3桁区切りは手で付ける
+export const full = (n: number): string => group(String(Math.round(n)))
+
+export const percent = (n: number): string => `${Math.round(n)}%`
+
+// 数え上げの起点にする、いま表示している数値。次の描画で値が動いた分だけ、ここから数え上げる
+export type PowerShown = {
+  // 利用枠ごとの残量(%)。キーは利用枠の種類
+  rings: Record<string, number>
+  // 電脳容量マップの使用率(%)
+  map: number
+  // 区画ごとのトークン数。キーは区画の名前
+  slices: Record<string, number>
+}
+
+// まだ何も表示していない状態。最初の描画は、ここ(すべて0)から数え上げる
+export const NO_POWER: PowerShown = { rings: {}, map: 0, slices: {} }
+
+// isBootは最初の描画(起点がまだ無い)であること。電脳負荷の数字は、どちらでも起点から数え上げる
+export type PowerMotion = { from: PowerShown; isBoot: boolean }
 
 // 利用枠の種類を、パネルに出す呼び名にする。知らない種類はそのまま出す
 export const labelOf = (kind: string): string => {
@@ -222,6 +244,8 @@ const clock = (ms: number | undefined, x: number, y: number, maxWidth: number): 
 // 36区画の輪で残量を示す。点灯区画は真上から時計回りに並べ、中央に回線番号と数値を出す
 
 const RING_SEGMENTS = 36
+// 数え上げの画数。SVGの文字数の上限(131072)に収めるため、小さな数字ほど画を減らす
+const RING_FRAMES = 12
 
 const xy = (cx: number, cy: number, r: number, degree: number): [string, string] => {
   const rad = ((degree - 90) * Math.PI) / 180
@@ -232,11 +256,24 @@ const polar = (cx: number, cy: number, r: number, degree: number): string => xy(
 
 type Ring = { cx: number; cy: number; inner: number; outer: number }
 
+// リングの中央に出す残量(%)。fromからtoへ数え上げる
+type Amount = { from: number; to: number }
+
+// 輪の上を回る走査線。細い放射線と、その後ろに40度ぶんの淡い扇形を、5秒で1周させる。
+// 文字より先に描き、数値と回線番号が上に残るようにする
+const sweep = ({ cx, cy, inner, outer }: Ring): string => {
+  const tip = outer + 6
+  const wake = `M${polar(cx, cy, inner, -40)} L${polar(cx, cy, tip, -40)} A${tip} ${tip} 0 0 1 ${polar(cx, cy, tip, 0)} L${polar(cx, cy, inner, 0)} A${inner} ${inner} 0 0 0 ${polar(cx, cy, inner, -40)} Z`
+  const [x1, y1] = xy(cx, cy, inner, 0)
+  const [x2, y2] = xy(cx, cy, tip, 0)
+  return `<g><path d="${wake}" fill="${LIT}" opacity="0.12"/><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${LIT}" stroke-width="1.2" opacity="0.8"/><animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${cy}" to="360 ${cx} ${cy}" dur="5s" repeatCount="indefinite"/></g>`
+}
+
 const ring = (
   { cx, cy, inner, outer }: Ring,
   ratio: number | undefined,
   code: string,
-  amount: string,
+  amount: Amount,
   amountSize: number,
 ): string => {
   const step = 360 / RING_SEGMENTS
@@ -259,8 +296,9 @@ const ring = (
   <circle cx="${cx}" cy="${cy}" r="${inner - 5}" fill="none" stroke="${DIM}" stroke-width="0.8" stroke-dasharray="1.5 2.5"/>
   ${ticks}
   <g filter="url(#glow)">${wedges}</g>
+  ${sweep({ cx, cy, inner, outer })}
   ${tag(cx - codeWidth / 2, cy - 15, 12, 8, LIT, GROUND, code, 'sans')}
-  ${text(cx, cy + amountSize * 0.55 + 2, amountSize, LIT, amount, { anchor: 'middle', face: 'sans', weight: 800 })}`
+  ${rollText({ x: cx, y: cy + amountSize * 0.55 + 2, size: amountSize, fill: LIT, anchor: 'middle', face: 'sans', weight: 800, ...amount, format: percent, frames: RING_FRAMES })}`
 }
 
 // ── 1基ぶんの表示内容 ──────────────────────────────────────
@@ -274,7 +312,8 @@ type Panel = {
   captionEn: string
   digits: (x: number, y: number, maxWidth: number) => string
   ratio: number | undefined
-  ringValue: string
+  // リングの中央に出す残量(%)。数え上げの起点から現在値まで
+  amount: Amount
   footer: string
   lamps: { label: string; isOn: boolean }[]
   note: string
@@ -326,7 +365,7 @@ const toneDefs = (): string =>
     })
     .join('')
 
-const limitPanel = (limit: Limit, now: number): Panel => {
+const limitPanel = (limit: Limit, now: number, motion?: PowerMotion): Panel => {
   const reading = readingOf(limit, now)
   const reset = resetOf(limit)
   const left = Math.max(0, 100 - limit.percentUsed)
@@ -338,7 +377,8 @@ const limitPanel = (limit: Limit, now: number): Panel => {
     captionEn: reading.captionEn,
     digits: (x, y, maxWidth) => clock(reading.ms, x, y, maxWidth),
     ratio: left / 100,
-    ringValue: `${Math.round(left)}%`,
+    // 動きがないときは起点を現在値にして、数え上げずにそのまま出す。前に無かった枠は0から数え上げる
+    amount: { from: motion === undefined ? left : (motion.from.rings[limit.kind] ?? 0), to: left },
     footer: reset === undefined ? '' : `再接続 ${untilText(reset - now)}`,
     lamps: MODES.map(({ mode, label }) => ({ label, isOn: reading.mode === mode })),
     note: reading.note,
@@ -346,13 +386,6 @@ const limitPanel = (limit: Limit, now: number): Panel => {
     tone: toneOf(left, reading.isDanger || reading.mode === 'halt', reading.mode === 'overrun'),
   }
 }
-
-export const kilo = (tokens: number): string =>
-  tokens >= 1_000_000
-    ? `${(tokens / 1_000_000).toFixed(1)}M`
-    : tokens >= 1000
-      ? `${Math.round(tokens / 1000)}k`
-      : String(Math.round(tokens))
 
 // コンテキストの使用率で段階を決める。電脳容量マップの最下段のランプに出す
 const CONTEXT_STAGES = [
@@ -363,8 +396,8 @@ const CONTEXT_STAGES = [
 ]
 
 // 利用枠のタイマーを、報告された順に最大3基
-const panelsOf = (limits: readonly Limit[], now: number): Panel[] =>
-  limits.slice(0, SLOTS).map(limit => limitPanel(limit, now))
+const panelsOf = (limits: readonly Limit[], now: number, motion?: PowerMotion): Panel[] =>
+  limits.slice(0, SLOTS).map(limit => limitPanel(limit, now, motion))
 
 // ── 部品 ────────────────────────────────────────────────
 
@@ -408,7 +441,7 @@ const timerModule = (panel: Panel, x: number, y: number): string => {
   return recolor(`<g transform="translate(${x} ${y})">
   ${plate(MODULE_W, MODULE_H, 18)}
   ${heading(12, 10, 13, panel, MODULE_W - 24)}
-  ${ring({ cx: 72, cy: 106, inner: 32, outer: 44 }, panel.ratio, panel.code, panel.ringValue, 15)}
+  ${ring({ cx: 72, cy: 106, inner: 32, outer: 44 }, panel.ratio, panel.code, panel.amount, 15)}
   ${text(146, 58, 12, LIT, panel.caption)}
   ${text(150 + panel.caption.length * 12.5, 58, 8, DIM, panel.captionEn, { face: 'sans', weight: 800, spacing: 1 })}
   <g filter="url(#glow)">${panel.digits(150, 66, 236)}</g>
@@ -434,7 +467,7 @@ const stripModule = (panel: Panel, x: number, y: number): string => {
   ${tag(10, 8, 18, 12, LIT, GROUND, xml(panel.name))}
   ${text(nameEnd + 8, 22, 11, LIT, panel.caption)}
   ${text(nameEnd + 12 + panel.caption.length * 11.5, 22, 7, DIM, xml(panel.english), { face: 'sans', weight: 800, spacing: 1 })}
-  ${ring({ cx: 56, cy: 72, inner: 24, outer: 34 }, panel.ratio, panel.code, panel.ringValue, 12)}
+  ${ring({ cx: 56, cy: 72, inner: 24, outer: 34 }, panel.ratio, panel.code, panel.amount, 12)}
   <g filter="url(#glow)">${panel.digits(116, 38, 232)}</g>
   ${annotate(352, 40, 364, 26, panel.note)}
   ${text(588, 47, 10, DIM, xml(panel.footer), { anchor: 'end' })}
@@ -458,7 +491,7 @@ const compactModule = (panel: Panel, x: number, y: number): string => {
   ${tag(10, 8, 17, 12, LIT, GROUND, xml(panel.name))}
   ${text(nameEnd + 8, 21, 11, LIT, panel.caption)}
   ${text(390, 21, 9, DIM, xml(panel.footer), { anchor: 'end' })}
-  ${ring({ cx: 52, cy: 74, inner: 24, outer: 33 }, panel.ratio, panel.code, panel.ringValue, 12)}
+  ${ring({ cx: 52, cy: 74, inner: 24, outer: 33 }, panel.ratio, panel.code, panel.amount, 12)}
   <g filter="url(#glow)" transform="translate(110 32) scale(${DIGIT_SCALE})">${panel.digits(0, 0, 270 / DIGIT_SCALE)}</g>
   ${annotate(114, 88, 124, 101, panel.note)}
   ${lamps}
@@ -518,6 +551,13 @@ export const memoryFrom = (context: ContextGauge | null): MemoryMap | null => {
   }
 }
 
+// いま描いている数値。次の描画で値が動いたとき、ここから数え上げる
+export const shownOf = (limits: readonly Limit[], memory: MemoryMap | null): PowerShown => ({
+  rings: Object.fromEntries(limits.slice(0, SLOTS).map(one => [one.kind, Math.max(0, 100 - one.percentUsed)])),
+  map: memory?.percentage ?? 0,
+  slices: Object.fromEntries((memory?.slices ?? []).map(one => [one.name, one.tokens])),
+})
+
 const stageOf = (memory: MemoryMap | null): string | undefined =>
   memory === null ? undefined : CONTEXT_STAGES.find(one => memory.percentage < one.below)?.label
 
@@ -526,8 +566,17 @@ const memoryTone = (memory: MemoryMap | null): Tone =>
 
 const BUFFER_STROKE = ` stroke="${AMBER}" stroke-width="0.8"`
 
+// 数え上げの画数。凡例は数が多いので、画を減らして文字数を抑える
+const HEADER_FRAMES = 16
+const LEGEND_FRAMES = 8
+
 // 電脳容量マップの1基。minHeightを渡すと、その高さまで最下段を下げてタイマーと高さを揃える
-const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height: number; draw: (x: number, y: number) => string } => {
+const mapModule = (
+  memory: MemoryMap | null,
+  w: number,
+  minHeight = 0,
+  motion?: PowerMotion,
+): { height: number; draw: (x: number, y: number) => string } => {
   const barX = 12
   const barW = w - 24
   const blocks = w >= 500 ? 50 : 32
@@ -563,17 +612,26 @@ const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height
     bufferStart === undefined
       ? ''
       : `<line x1="${barX + bufferStart * step - 1}" y1="30" x2="${barX + bufferStart * step - 1}" y2="${38 + barH}" stroke="${CYAN}" stroke-width="1.5"/>`
+  // 帯の上を、区画3つぶんの幅の明るい帯が左から右へ流れる。2.6秒で渡り、1.4秒休んで、4秒で1周する。
+  // 帯の外へはみ出さないよう、帯の形で切り抜く。切り抜きのidはSVGの中で唯一にする
+  const scanW = 3 * step
+  const scanClip = `<clipPath id="map-clip"><rect x="${barX}" y="34" width="${barW}" height="${barH}"/></clipPath>`
+  const scan = `<rect clip-path="url(#map-clip)" x="${barX - scanW}" y="34" width="${scanW}" height="${barH}" fill="${LIT}" opacity="0.18"><animate attributeName="x" values="${barX - scanW};${barX + barW};${barX + barW}" keyTimes="0;0.65;1" dur="4s" repeatCount="indefinite"/></rect>`
   const columnW = barW / columns
+  // 凡例のトークン数が桁を増やしても、名前の列に食い込まない幅の上限
+  const amountFit = Math.round(columnW * 0.35)
   const legend = rows
     .map(({ slice, color }, i) => {
       const x = barX + (i % columns) * columnW
       const y = legendTop + Math.floor(i / columns) * 15
       // 名前は、右寄せのトークン数(等幅9px、1文字約5.5px)とのあいだに6pxの隙間を残した幅に収める
-      const amount = kilo(slice.tokens)
-      const room = columnW - 12 - 10 - amount.length * 5.5 - 6
+      const amount = full(slice.tokens)
+      const room = columnW - 12 - 10 - Math.min(amountFit, amount.length * 5.5) - 6
+      // この区画が前の描画に無かったときは0から数え上げる
+      const from = motion === undefined ? slice.tokens : (motion.from.slices[slice.name] ?? 0)
       return `<rect x="${x}" y="${y - 8}" width="8" height="8" fill="${color}"${slice.kind === 'buffer' ? BUFFER_STROKE : ''}/>
   ${text(x + 12, y, 10, slice.kind === 'used' ? PAPER : DIM, xml(fitText(sliceName(slice), 10, room)))}
-  ${text(x + columnW - 10, y, 9, DIM, amount, { anchor: 'end', face: 'mono', weight: 500 })}`
+  ${rollText({ x: x + columnW - 10, y, size: 9, fill: DIM, anchor: 'end', face: 'mono', weight: 500, fit: amountFit, from, to: slice.tokens, format: full, frames: LEGEND_FRAMES, duration: 1.2 })}`
     })
     .join('')
   const lampW = (barW - 4 * 6) / 5
@@ -583,6 +641,25 @@ const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height
     memory === null
       ? '※ 次の応答のあとで計測します'
       : '※ 使用が圧縮予備域（橙の枠）に達すると、自動で記憶圧縮されます'
+  // 使用率と窓の大きさ。数え上げるのは使用率だけで、窓の大きさは同じtext要素の末尾に付けて右寄せの位置を保つ。
+  // 幅は、左の見出し(英語名のぶんを約96px)と重ならない範囲に収める
+  const header =
+    memory === null
+      ? text(w - 12, 21, 11, LIT, '計測待ち', { anchor: 'end', weight: 800 })
+      : rollText({
+          x: w - 12,
+          y: 21,
+          size: 11,
+          fill: LIT,
+          anchor: 'end',
+          weight: 800,
+          fit: w - 12 - (nameEnd + 8 + 96) - 8,
+          from: motion === undefined ? memory.percentage : motion.from.map,
+          to: memory.percentage,
+          format: n => `使用 ${percent(n)}`,
+          suffix: ` ／ ${full(memory.max)}`,
+          frames: HEADER_FRAMES,
+        })
 
   return {
     height,
@@ -591,8 +668,10 @@ const mapModule = (memory: MemoryMap | null, w: number, minHeight = 0): { height
   ${plate(w, height, 14)}
   ${tag(10, 8, 17, 12, LIT, GROUND, '電脳容量マップ')}
   ${text(nameEnd + 8, 21, 7, DIM, 'NEURAL MEMORY MAP', { face: 'sans', weight: 800, spacing: 1 })}
-  ${text(w - 12, 21, 11, LIT, memory === null ? '計測待ち' : `使用 ${Math.round(memory.percentage)}% ／ ${kilo(memory.max)}`, { anchor: 'end', weight: 800 })}
+  ${header}
+  ${scanClip}
   <g filter="url(#glow)">${cells}</g>${line}
+  ${scan}
   ${legend}
   ${text(barX, noteY, 9, CYAN, note, { weight: 600 })}
   ${lamps}
@@ -608,25 +687,28 @@ export const layoutWidth = (layout: Layout): number =>
 // 利用枠のタイマーと電脳容量マップを並べる。
 // wide: 原寸のタイマーを横に並べ、空いた基に電脳容量マップ。3基とも埋まっていればマップを下に全幅で置く
 // medium: 横長の帯を縦に積み、その下にマップ。narrow: 小型を縦に積み、その下にマップ
+// motionを渡すと、リングの中央・マップの使用率・凡例のトークン数を、前に表示した数値から数え上げる。
+// 渡さないときは最終値をそのまま出す(輪の走査線とマップの帯は、どちらでも流れる)
 export const powerSvg = (
   limits: readonly Limit[],
   memory: MemoryMap | null,
   now: number,
   layout: Layout,
   drawWidth: number,
+  motion?: PowerMotion,
 ): { source: string; width: number; height: number } => {
-  const panels = panelsOf(limits, now)
+  const panels = panelsOf(limits, now, motion)
   const width = layoutWidth(layout)
   let modules: string
   let height: number
   if (layout === 'wide') {
     const timers = panels.map((panel, i) => timerModule(panel, i * (MODULE_W + GAP), 0)).join('')
     if (panels.length < SLOTS) {
-      const map = mapModule(memory, MODULE_W, MODULE_H)
+      const map = mapModule(memory, MODULE_W, MODULE_H, motion)
       modules = timers + map.draw(panels.length * (MODULE_W + GAP), 0)
       height = MODULE_H
     } else {
-      const map = mapModule(memory, width)
+      const map = mapModule(memory, width, 0, motion)
       modules = timers + map.draw(0, MODULE_H + GAP)
       height = MODULE_H + GAP + map.height
     }
@@ -636,7 +718,7 @@ export const powerSvg = (
     const timers = panels
       .map((panel, i) => (isMedium ? stripModule(panel, 0, i * pitch) : compactModule(panel, 0, i * pitch)))
       .join('')
-    const map = mapModule(memory, width)
+    const map = mapModule(memory, width, 0, motion)
     modules = timers + map.draw(0, panels.length * pitch)
     height = panels.length * pitch + map.height
   }
@@ -673,10 +755,10 @@ export const powerRows = (
     const top = ordered(memory)
       .filter(one => one.slice.kind === 'used')
       .slice(0, 3)
-      .map(one => `${sliceName(one.slice)} ${kilo(one.slice.tokens)}`)
+      .map(one => `${sliceName(one.slice)} ${full(one.slice.tokens)}`)
       .join(' ')
     rows.push({
-      text: `電脳容量 使用${Math.round(memory.percentage)}% ${kilo(memory.used)} / ${kilo(memory.max)} [${stageOf(memory)}] ${top}`,
+      text: `電脳容量 使用${Math.round(memory.percentage)}% ${full(memory.used)} / ${full(memory.max)} [${stageOf(memory)}] ${top}`,
       color: TONES[memoryTone(memory)].lit,
     })
   }
