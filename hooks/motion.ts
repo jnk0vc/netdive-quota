@@ -1,4 +1,4 @@
-import { FACES, FLASH, MONO, fitAttr, text, xml } from './palette'
+import { FACES, MONO, fitAttr, text, xml } from './palette'
 import type { TextOptions } from './palette'
 
 // SVGの中だけで完結する動き(SMIL)の部品。
@@ -10,35 +10,6 @@ const trim = (n: number, digits: number): number => +n.toFixed(digits)
 // 目に見える減速のある進み方。最初に大きく進み、着地に向けて遅くなる
 const easeOutCubic = (t: number): number => 1 - (1 - t) * (1 - t) * (1 - t)
 
-// 3つの整数を混ぜた整数。数字のちらつきに使う。Math.randomは使わない
-const mix = (a: number, b: number, c: number): number => {
-  let h = Math.imul(a | 0, 0x9e3779b1) ^ Math.imul((b + 1) | 0, 0x85ebca6b) ^ Math.imul((c + 7) | 0, 0xc2b2ae35)
-  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d)
-  h = Math.imul(h ^ (h >>> 12), 0x297a2d39)
-  return (h ^ (h >>> 15)) >>> 0
-}
-
-const isDigit = (char: string): boolean => char >= '0' && char <= '9'
-
-// 途中の数字のうち、着地する数字と食い違う桁をちらつかせる(0-9だけ。区切りの , . や $ % は残す)。
-// 食い違う桁のいちばん上は素直に数え上げ、それより下の桁(末尾から最大2桁)だけを回す。
-// 上の桁まで回すと、着地する値を飛び越えた数字が一瞬見える。1桁だけ違うときはその桁を回す
-const flicker = (shown: string, last: string, value: number, frame: number): string => {
-  const chars = [...shown]
-  const at = chars.flatMap((char, i) => (isDigit(char) ? [i] : []))
-  const goal = [...last].filter(isDigit)
-  // 末尾から数えて、いちばん上で食い違う桁の位置
-  let top = 0
-  for (let j = 1; j <= Math.max(at.length, goal.length); j += 1) {
-    if (chars[at[at.length - j] ?? -1] !== goal[goal.length - j]) top = j
-  }
-  const count = Math.min(2, at.length, top > 1 ? top - 1 : top)
-  for (const i of at.slice(at.length - count)) {
-    chars[i] = String(mix(Math.round(value * 100), frame, i) % 10)
-  }
-  return chars.join('')
-}
-
 export type RollOptions = TextOptions & {
   x: number
   y: number
@@ -47,20 +18,19 @@ export type RollOptions = TextOptions & {
   from: number
   to: number
   format: (n: number) => string
-  // 数字のあとにそのまま続ける文字。ちらつきの対象にならず、同じtext要素に入るので右寄せや中央寄せでもずれない
+  // 数字のあとにそのまま続ける文字。同じtext要素に入るので右寄せや中央寄せでもずれない
   suffix?: string
   // 数え上げにかける秒数と、その間に切り替える画の数
   duration?: number
   frames?: number
-  // 着地の瞬間に重ねて光らせる色
-  flash?: string
 }
 
-// 数字が数え上がっていく文字。fromからtoへ、末尾2桁をちらつかせながら進み、着地すると一瞬光る。
+// 数字が数え上がっていく文字。fromからtoへ、減速しながら途中の値を順に見せて着地する。
+// 末尾の桁をでたらめに回したり、着地で光らせたりはしない(値が動くたびに点滅して見え、うるさい)。
 // 画はvisibilityをsetで切り替えて見せる(フレームkはt_kから次のフレームまで。最後の画は残る)。
 // fromとtoの表示が同じなら動かさず、普通のtext()と同じ文字列を返す
 export const rollText = (o: RollOptions): string => {
-  const { x, y, size, fill, from, to, format, suffix = '', duration = 1.6, frames = 24, flash = FLASH } = o
+  const { x, y, size, fill, from, to, format, suffix = '', duration = 0.9, frames = 12 } = o
   const { anchor = 'start', weight = 700, face = 'gothic', spacing = 0, fit } = o
   const last = format(to)
   if (from === to || format(from) === last) {
@@ -70,8 +40,7 @@ export const rollText = (o: RollOptions): string => {
   const view = (k: number): string => {
     if (k === 0) return format(from)
     if (k === frames) return last
-    const value = from + (to - from) * easeOutCubic(k / frames)
-    return flicker(format(value), last, value, k)
+    return format(from + (to - from) * easeOutCubic(k / frames))
   }
   const letter = spacing ? ` letter-spacing="${spacing}"` : ''
   const pictures = Array.from({ length: frames + 1 }, (_, k) => {
@@ -81,9 +50,7 @@ export const rollText = (o: RollOptions): string => {
     const hide = k === frames ? '' : `<set attributeName="visibility" to="hidden" begin="${at(k + 1)}s"/>`
     return `<text x="${x}" y="${y}"${fitAttr(body, size, spacing, fit)}${hidden}>${body}${show}${hide}</text>`
   }).join('')
-  const landed = xml(last + suffix)
-  const glint = `<text x="${x}" y="${y}"${fitAttr(landed, size, spacing, fit)} fill="${flash}" opacity="0">${landed}<animate attributeName="opacity" values="0;0.9;0" dur="0.7s" begin="${duration}s" fill="freeze"/></text>`
-  return `<g font-family="${FACES[face]}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}"${letter}>${pictures}${glint}</g>`
+  return `<g font-family="${FACES[face]}" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}"${letter}>${pictures}</g>`
 }
 
 // 増えた分を示す小さな文字。置いた位置から14px浮かびながら、2.2秒かけて消える

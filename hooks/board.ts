@@ -1,6 +1,6 @@
 import type { Escort, LogEntry, UnitName, Units, Verdict } from '../types'
 import { ticker, tickerWidth } from './motion'
-import { AMBER, FLASH, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, textWidth, xml } from './palette'
+import { AMBER, GREEN, MOSS, PAPER, RED, VOID, clip, crtDefs, scanlines, svgSize, tag, tagWidth, text, textWidth, xml } from './palette'
 import type { Layout } from './palette'
 
 export const UNIT_LABEL: Record<UnitName, string> = { SCOUT: '索敵', REWRITE: '改竄', DIVE: '潜入' }
@@ -194,12 +194,7 @@ const trace = (
           entry.verdict === 'running'
             ? '<animate attributeName="opacity" values="1;0.25;1" dur="0.7s" repeatCount="indefinite"/>'
             : ''
-        // 今回増えた打刻は、白に近い緑が一瞬光ってから落ち着く
-        const glint =
-          i === recent.length - 1 && entry.id === motion?.freshId
-            ? `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${FLASH}" opacity="0.9"><animate attributeName="opacity" from="0.9" to="0" dur="0.5s" fill="freeze"/></rect>`
-            : ''
-        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[entry.verdict]}">${pulse}</rect>${glint}`
+        return `<rect x="${columnX(i) + 2}" y="${y + 6}" width="${STEP - 4}" height="${LANE_H - 16}" fill="${VERDICT_COLOR[entry.verdict]}">${pulse}</rect>`
       })
       .join('')
     // 班の名前は反転表示、随伴機の名前は縁取りだけにして区別する
@@ -268,10 +263,11 @@ const TOOL_X = 196
 const CHAR = 7.3
 const advanceOf = (char: string): number => ((char.codePointAt(0) ?? 0) >= 0x2e80 ? 12 : CHAR)
 
-// 最新の行の仕上げ。対象の文字のすぐ右に、点滅する緑の四角いカーソルを置く。
+// 最新の行の仕上げ。対象の文字のすぐ右に、ゆっくり明暗する緑の四角いカーソルを置く。
+// 点いたり消えたりする点滅はチラつきに見えるので、消し切らずに明暗させる。
 // isFreshのとき(今回増えた行)は、さらに打ち込みの演出を重ねる。
-//   地の色の覆いが対象の左端から1文字ずつ右へ動いて文字を現し、先頭には緑のカーソルが付き、行は緑に光ってから消える。
-//   1文字あたり0.03秒で、全体は0.6秒までに収める。点滅のカーソルは打ち終わってから現れる
+//   地の色の覆いが対象の左端から1文字ずつ右へ動いて文字を現し、先頭には緑のカーソルが付く。
+//   1文字あたり0.03秒で、全体は0.6秒までに収める。明暗するカーソルは打ち終わってから現れる
 const newestRow = (row: string, tool: string, summary: string, y: number, width: number, isFresh: boolean): string => {
   // 各文字の手前の位置。最後は文字列の右端
   let at = TOOL_X
@@ -279,13 +275,12 @@ const newestRow = (row: string, tool: string, summary: string, y: number, width:
   const typing = isFresh ? +(stops.length * Math.min(0.03, 0.6 / stops.length)).toFixed(2) : 0
   const blink = `<rect x="${round1(at + 1)}" y="${y - 11}" width="${CHAR}" height="14" fill="${GREEN}"${isFresh ? ' visibility="hidden"' : ''}>${
     isFresh ? `<set attributeName="visibility" to="visible" begin="${typing}s"/>` : ''
-  }<animate attributeName="opacity" calcMode="discrete" values="1;0" keyTimes="0;0.5" dur="1.1s"${isFresh ? ` begin="${typing}s"` : ''} repeatCount="indefinite"/></rect>`
+  }<animate attributeName="opacity" values="0.9;0.3;0.9" dur="2.4s"${isFresh ? ` begin="${typing}s"` : ''} repeatCount="indefinite"/></rect>`
   if (!isFresh) return `${row}${blink}`
   const move = `<animate attributeName="x" calcMode="discrete" values="${stops.map(round1).join(';')}" dur="${typing}s" fill="freeze"/>`
-  const highlight = `<rect x="0" y="${y - 15}" width="${width}" height="${ROW_H}" fill="${GREEN}" opacity="0.15"><animate attributeName="opacity" from="0.15" to="0" dur="0.8s" fill="freeze"/></rect>`
   const cover = `<rect x="${TOOL_X}" y="${y - 13}" width="${width - TOOL_X}" height="19" fill="${VOID}">${move}</rect>`
   const lead = `<rect x="${TOOL_X}" y="${y - 11}" width="${CHAR}" height="14" fill="${GREEN}">${move}<set attributeName="visibility" to="hidden" begin="${typing}s"/></rect>`
-  return `${highlight}${row}${cover}${lead}${blink}`
+  return `${row}${cover}${lead}${blink}`
 }
 
 // 電脳ログ。端末のコード表示のように等幅で並べ、幅に収まる文字数で対象を切り詰める。

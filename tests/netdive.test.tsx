@@ -351,6 +351,14 @@ const svgSources = async ($: Engine, bodyColumns: number, bodyRows = 30) => {
   }
 }
 
+// データが動いたあとのSVG。動いたあとの最初の描画では作り直さずに待ち始めるので、
+// 待ち時間と間隔の下限が過ぎるまで時計を進めてから描き直したものを返す
+const settledSources = async ($: Engine, clock: ReturnType<typeof mock.clock>, bodyColumns: number, bodyRows = 30) => {
+  await svgSources($, bodyColumns, bodyRows)
+  await clock.advance(5_000)
+  return svgSources($, bodyColumns, bodyRows)
+}
+
 test('計器と端末の行は、トークンとコストを桁を丸めずに出し、桁が増えても枠に収める', async ($, on) => {
   mock.clock(on, { now: 1000 })
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -410,17 +418,61 @@ test('表示するデータが変わらないときは、描き直してもSVG�
     expect(second.alts).toEqual(first.alts)
   }
 
-  // 3つのSVGは別々に判断する。ログだけが動けば、作業班トレースだけが変わる
+  // 3つのSVGは別々に判断する。ログだけが動けば、作業班トレースだけが変わる。
+  // 変わった直後はまだ作り直さず(続けて書き換わる分をまとめる)、待ち時間が過ぎてから作り直す
   const before = await svgSources($, 130)
   await $.tool.call({ tool: 'Read', file_path: '/src/other.ts' })
+  const waiting = await svgSources($, 130)
+  expect(waiting.board).toBe(before.board)
+  await clock.advance(2_000)
   const after = await svgSources($, 130)
   expect(after.board).not.toBe(before.board)
   expect(after.power).toBe(before.power)
   expect(after.vitals).toBe(before.vitals)
 })
 
+test('続けて書き換わっても、1枚のSVGを作り直すのは待ち時間と間隔の下限ごとに1回にまとめる', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
+  on('tool.call', () => ({ result: 'ok' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.tool.call({ tool: 'Read', file_path: '/src/a.ts' })
+  const boot = await svgSources($, 130)
+
+  // 3回続けて実行しても、待ち時間(0.7秒)のあいだは前のSVGのまま
+  for (const name of ['b', 'c', 'd']) {
+    await $.tool.call({ tool: 'Read', file_path: `/src/${name}.ts` })
+    expect((await svgSources($, 130)).board).toBe(boot.board)
+  }
+  // 待ち時間と間隔の下限(1.5秒)が過ぎると、最後の状態でまとめて1回作り直す
+  await clock.advance(1_500)
+  const settled = await svgSources($, 130)
+  expect(settled.board).not.toBe(boot.board)
+  expect(settled.board).toContain('d.ts')
+
+  // 開いたままのパネルは、待ち時間が過ぎるとタイマーで描き直され、ほかの書き換えを待たずに最新になる
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE_PROPS, bodyColumns: 130 } })
+  const boardOf = async () =>
+    String((await pane.findAll({ type: 'Svg' })).find(one => String(one.props.alt).startsWith('作業班トレース'))?.props.source)
+  await $.tool.call({ tool: 'Read', file_path: '/src/e.ts' })
+  expect(await boardOf()).not.toContain('e.ts')
+  await clock.advance(2_000)
+  expect(await boardOf()).toContain('e.ts')
+  await pane.unmount()
+
+  // 計器は間隔の下限が4秒。作り直した直後に値が動いても、4秒たつまでは前の数字のまま
+  await complete($, 'turn-1', USAGE(1000, 500, 2000, 500))
+  const first = await settledSources($, clock, 130)
+  expect(first.vitals).toContain('>4,000<')
+  await complete($, 'turn-2', USAGE(1000, 200, 300, 0))
+  await svgSources($, 130)
+  await clock.advance(1_000)
+  expect((await svgSources($, 130)).vitals).toBe(first.vitals)
+  await clock.advance(3_000)
+  expect((await svgSources($, 130)).vitals).toContain('>5,500<')
+})
+
 test('トークンが増えると、計器の数字が前の値から数え上がり、増えた分が浮かぶ', async ($, on) => {
-  mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
+  const clock = mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
   on('turn.complete', (_, e) => ({ text: e.answer }))
   await complete($, 'turn-1', USAGE(1000, 500, 2000, 500))
 
@@ -432,7 +484,7 @@ test('トークンが増えると、計器の数字が前の値から数え上�
 
   // 交信量が1,500増える(入力1,000 + キャッシュ読込300 + 出力200)
   await complete($, 'turn-2', USAGE(1000, 200, 300, 0))
-  const next = await svgSources($, 130)
+  const next = await settledSources($, clock, 130)
   expect(next.vitals).toContain('<set attributeName="visibility"')
   expect(next.vitals).toContain('>5,500<')
   expect(next.vitals).toMatch(/>\+1,500</)
@@ -447,7 +499,7 @@ test('トークンが増えると、計器の数字が前の値から数え上�
 
 // 重い構成を作る: 利用枠3基・内訳9区分・ログ60件・随伴機3機
 const crowd = async ($: Engine, on: Parameters<typeof mock.clock>[0]) => {
-  mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
+  const clock = mock.clock(on, { now: Date.parse('2026-10-05T10:00:00Z') })
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -519,13 +571,13 @@ const crowd = async ($: Engine, on: Parameters<typeof mock.clock>[0]) => {
     else await $.tool.call({ tool: 'Edit', file_path, old_string: 'a', new_string: 'b' })
   }
   await complete($, 'turn-1', USAGE(1_234_567, 345_678, 9_876_543, 456_789))
-
+  return clock
 }
 
 // 幅ごとに別のテスト(別の描画の履歴)にして、どの幅も最初の描画(すべての数字を0から数え上げる、最も長いとき)を測る
 for (const bodyColumns of [130, 100, 48]) {
   test(`利用枠3基・内訳9区分・ログ60件・随伴機3機でも、動きを付けたどのSVGも文字数の上限に収まる(${bodyColumns}列)`, async ($, on) => {
-    await crowd($, on)
+    const clock = await crowd($, on)
 
     const boot = await svgSources($, bodyColumns, 80)
     for (const source of [boot.power, boot.vitals, boot.board]) expect(source.length).toBeLessThan(131_072)
@@ -538,7 +590,7 @@ for (const bodyColumns of [130, 100, 48]) {
     // 数字が動いたあとの描き直しも収まる
     await complete($, 'turn-2', USAGE(2000, 400, 1000, 0))
     await $.tool.call({ tool: 'Bash', command: 'npm test' })
-    const next = await svgSources($, bodyColumns, 80)
+    const next = await settledSources($, clock, bodyColumns, 80)
     for (const source of [next.power, next.vitals, next.board]) expect(source.length).toBeLessThan(131_072)
     expect(next.vitals).toMatch(/>\+[\d,]+</)
   })
@@ -564,27 +616,30 @@ test('経過時間の時計と新しい行の打ち込みを、作業班トレ�
   expect(during.board).toContain('dur="60s" begin="-13s" repeatCount="indefinite"')
   expect(during.board).toContain('dur="6000s" begin="-4873s" repeatCount="indefinite"')
   expect(during.board).not.toContain('dur="60000s"')
-  // 新しい行は、地の色の覆いを動かして打ち込み、そのあと点滅のカーソルが出る
+  // 新しい行は、地の色の覆いを動かして打ち込み、そのあと明暗するカーソルが出る
   expect(during.board).toContain('calcMode="discrete" values="196;')
-  expect(during.board).toContain('values="1;0" keyTimes="0;0.5" dur="1.1s"')
+  expect(during.board).toContain('values="0.9;0.3;0.9" dur="2.4s"')
   // 状況に応じた波形が、見出しの空きに流れる
   expect(during.board).toContain('clip-path="url(#scope-clip)"')
   expect(during.board).toContain('type="translate"')
+  // 点いたり消えたりする点滅や、一瞬光る演出は置かない
+  expect(during.board).not.toContain('values="1;0"')
+  expect(during.board).not.toContain('#E8FFE0')
 
-  // 同じ行の判定が変わっただけのときは、打ち込み直さない。点滅のカーソルと波形は残る
+  // 同じ行の判定が変わっただけのときは、打ち込み直さない。カーソルと波形は残る
   finish()
   await running
-  const after = await svgSources($, 130)
+  const after = await settledSources($, clock, 130)
   expect(after.board).not.toBe(during.board)
   expect(after.board).not.toContain('calcMode="discrete" values="196;')
-  expect(after.board).toContain('values="1;0" keyTimes="0;0.5" dur="1.1s"')
+  expect(after.board).toContain('values="0.9;0.3;0.9" dur="2.4s"')
   expect(after.board).toContain('clip-path="url(#scope-clip)"')
 })
 
 // ── トークンの集計 ────────────────────────────────────────
 
 test('モデルへの要求ごとにトークンが増え、ターンの終わりで二重に数えない', async ($, on) => {
-  mock.clock(on, { now: 1000 })
+  const clock = mock.clock(on, { now: 1000 })
   const steps: Record<string, ReturnType<typeof USAGE>> = {
     'turn-1:0': USAGE(100, 50, 300, 100),
     'turn-1:1': USAGE(10, 5, 0, 0),
@@ -623,7 +678,8 @@ test('モデルへの要求ごとにトークンが増え、ターンの終わ�
   // 要求のないターンは、ターンの使用量がそのまま加わる
   await complete($, 'turn-2', USAGE(1000, 0, 0, 0))
   expect(await isShowing('1,565')).toBe(true)
-  expect((await svgSources($, 130)).vitals).toContain('※ 2ターンの累計')
+  // 計器のSVGは、動いたあと少し待ってから作り直す
+  expect((await settledSources($, clock, 130)).vitals).toContain('※ 2ターンの累計')
 
   // ステップの合計がターンの使用量を上回っても、累計は減らない
   await step('turn-3', 0)

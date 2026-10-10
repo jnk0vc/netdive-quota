@@ -49,6 +49,8 @@ declare module 'claude-code' {
       cost: number | null
       tokens: TokenTally
       memory: MemoryMap | null
+      // 作り直しを後回しにしたSVGを、間隔が空いたところで描き直させるための数
+      redraw: number
     }
   }
 }

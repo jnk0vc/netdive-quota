@@ -259,14 +259,15 @@ type Ring = { cx: number; cy: number; inner: number; outer: number }
 // リングの中央に出す残量(%)。fromからtoへ数え上げる
 type Amount = { from: number; to: number }
 
-// 輪の上を回る走査線。細い放射線と、その後ろに40度ぶんの淡い扇形を、5秒で1周させる。
+// 輪の上を回る走査線。細い放射線と、その後ろに40度ぶんの淡い扇形を、10秒で1周させる。
+// 速く明るく回すと目を引きすぎるので、ゆっくり淡くする。
 // 文字より先に描き、数値と回線番号が上に残るようにする
 const sweep = ({ cx, cy, inner, outer }: Ring): string => {
   const tip = outer + 6
   const wake = `M${polar(cx, cy, inner, -40)} L${polar(cx, cy, tip, -40)} A${tip} ${tip} 0 0 1 ${polar(cx, cy, tip, 0)} L${polar(cx, cy, inner, 0)} A${inner} ${inner} 0 0 0 ${polar(cx, cy, inner, -40)} Z`
   const [x1, y1] = xy(cx, cy, inner, 0)
   const [x2, y2] = xy(cx, cy, tip, 0)
-  return `<g><path d="${wake}" fill="${LIT}" opacity="0.12"/><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${LIT}" stroke-width="1.2" opacity="0.8"/><animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${cy}" to="360 ${cx} ${cy}" dur="5s" repeatCount="indefinite"/></g>`
+  return `<g><path d="${wake}" fill="${LIT}" opacity="0.07"/><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${LIT}" stroke-width="1" opacity="0.45"/><animateTransform attributeName="transform" type="rotate" from="0 ${cx} ${cy}" to="360 ${cx} ${cy}" dur="10s" repeatCount="indefinite"/></g>`
 }
 
 const ring = (
@@ -567,7 +568,7 @@ const memoryTone = (memory: MemoryMap | null): Tone =>
 const BUFFER_STROKE = ` stroke="${AMBER}" stroke-width="0.8"`
 
 // 数え上げの画数。凡例は数が多いので、画を減らして文字数を抑える
-const HEADER_FRAMES = 16
+const HEADER_FRAMES = 12
 const LEGEND_FRAMES = 8
 
 // 電脳容量マップの1基。minHeightを渡すと、その高さまで最下段を下げてタイマーと高さを揃える
@@ -612,11 +613,6 @@ const mapModule = (
     bufferStart === undefined
       ? ''
       : `<line x1="${barX + bufferStart * step - 1}" y1="30" x2="${barX + bufferStart * step - 1}" y2="${38 + barH}" stroke="${CYAN}" stroke-width="1.5"/>`
-  // 帯の上を、区画3つぶんの幅の明るい帯が左から右へ流れる。2.6秒で渡り、1.4秒休んで、4秒で1周する。
-  // 帯の外へはみ出さないよう、帯の形で切り抜く。切り抜きのidはSVGの中で唯一にする
-  const scanW = 3 * step
-  const scanClip = `<clipPath id="map-clip"><rect x="${barX}" y="34" width="${barW}" height="${barH}"/></clipPath>`
-  const scan = `<rect clip-path="url(#map-clip)" x="${barX - scanW}" y="34" width="${scanW}" height="${barH}" fill="${LIT}" opacity="0.18"><animate attributeName="x" values="${barX - scanW};${barX + barW};${barX + barW}" keyTimes="0;0.65;1" dur="4s" repeatCount="indefinite"/></rect>`
   const columnW = barW / columns
   // 凡例のトークン数が桁を増やしても、名前の列に食い込まない幅の上限
   const amountFit = Math.round(columnW * 0.35)
@@ -669,9 +665,7 @@ const mapModule = (
   ${tag(10, 8, 17, 12, LIT, GROUND, '電脳容量マップ')}
   ${text(nameEnd + 8, 21, 7, DIM, 'NEURAL MEMORY MAP', { face: 'sans', weight: 800, spacing: 1 })}
   ${header}
-  ${scanClip}
   <g filter="url(#glow)">${cells}</g>${line}
-  ${scan}
   ${legend}
   ${text(barX, noteY, 9, CYAN, note, { weight: 600 })}
   ${lamps}

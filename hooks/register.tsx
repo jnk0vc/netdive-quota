@@ -41,6 +41,8 @@ const tokens = atom({ plugin: 'netdive-quota', key: 'tokens' } as const, {
 })
 // コンテキストの内訳。応答のたびにローカルの見積もり(summary)で取り直す
 const memory = atom({ plugin: 'netdive-quota', key: 'memory' } as const, null)
+// 作り直しを後回しにしたSVGを、間隔が空いたところで描き直させるための数。パネルはこれを読んで描き直す
+const redraw = atom({ plugin: 'netdive-quota', key: 'redraw' } as const, 0)
 
 // 読む・探すはSCOUT(索敵)、書くはREWRITE(改竄)、実行とそれ以外はDIVE(潜入)が受け持つ
 const READERS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'LSP', 'ToolSearch']
@@ -87,29 +89,59 @@ const settle = (list: readonly Escort[], matches: (one: Escort) => boolean, verd
   list.map(one => (matches(one) && one.verdict === 'running' ? { ...one, verdict } : one))
 
 // ── SVGの作り直しの制御 ─────────────────────────────────────
-// ホストは、SVGの文字列が1文字でも変わると読み込み直し、動きを頭から再生し直す(チラつく)。
+// ホストは、SVGの文字列が1文字でも変わると枠(iframe)ごと読み込み直し、そのあいだ一瞬消える(チラつく)。
 // そこで、表示する内容が変わらない限り、前に作ったSVGをそのまま返す。
+// 内容が変わっても、すぐには作り直さない。1回のツール実行や応答では状態が何度か続けて書き換わるので、
+// 変わり始めてからSETTLEの時間を待ち、まとめて1回だけ作り直す。さらに前に作り直してからGAPの時間がたつまでは待つ。
+// 待っているあいだは前のSVGを出し続け、時間が来たらパネルを描き直させて最新の値で作る。
 // 数え上げの起点には、そのとき表示していた数値を持っておく
 
 // altも作ったときの文字で持つ。描くたびの時刻で作り直すと(経費のペースが毎回変わる)、SVGごと描き直しになる
 type Drawn = { source: string; width: number; height: number; alt?: string }
-type Built<S> = { key: string; drawn: Drawn; shown: S }
+// shapeはパネルの幅や行数。waitingSinceは、作ったときと違う内容を最初に受け取った時刻。待っていなければundefined
+type Built<S> = { key: string; shape: string; drawn: Drawn; shown: S; builtAt: number; waitingSince?: number }
 
 // 動きの分だけ文字列が長くなる。ホストの上限(131072文字)に近づいたら、動きをやめて作り直す
 const SOURCE_LIMIT = 125_000
 
-function rebuild<S>(
-  cache: Map<string, Built<S>>,
-  slot: string,
-  key: string,
-  shown: S,
-  make: (previous: S | undefined, hasMotion: boolean) => Drawn,
-): Drawn {
+// 変わり始めてから作り直すまで待つ時間(ミリ秒)。短いツール実行なら、開始から終了までをまとめて1回で描く
+const SETTLE = 700
+// 同じSVGを作り直す間隔の下限(ミリ秒)。作業班トレースはツールの実行を追うので短くする
+const GAP = { power: 4000, vitals: 4000, board: 1500 } as const
+
+type Rebuild<S> = {
+  cache: Map<string, Built<S>>
+  slot: string
+  // 表示するデータ(nowを除く)と、パネルの幅や行数。どちらも文字列にして比べる
+  key: string
+  shape: string
+  shown: S
+  now: number
+  gap: number
+  // 作り直しを後回しにしたとき、何ミリ秒後に描き直せばよいかを受け取る
+  later: (wait: number) => void
+  make: (previous: S | undefined, hasMotion: boolean) => Drawn
+}
+
+function rebuild<S>({ cache, slot, key, shape, shown, now, gap, later, make }: Rebuild<S>): Drawn {
   const hit = cache.get(slot)
-  if (hit?.key === key) return hit.drawn
+  if (hit?.key === key && hit.shape === shape) {
+    // 待っているあいだに元の内容へ戻ったなら、作り直す必要はない
+    hit.waitingSince = undefined
+    return hit.drawn
+  }
+  // 初めて描くときと、パネルの幅や行数が変わったとき(描き直しはどのみち起きる)は待たない
+  if (hit !== undefined && hit.shape === shape) {
+    hit.waitingSince ??= now
+    const due = Math.max(hit.waitingSince + SETTLE, hit.builtAt + gap)
+    if (now < due) {
+      later(due - now)
+      return hit.drawn
+    }
+  }
   let drawn = make(hit?.shown, true)
   if (drawn.source.length > SOURCE_LIMIT) drawn = make(hit?.shown, false)
-  cache.set(slot, { key, drawn, shown })
+  cache.set(slot, { key, shape, drawn, shown, builtAt: now })
   return drawn
 }
 
@@ -124,6 +156,8 @@ export const register: Register = on => {
   // 作業班トレースと電脳ログは、前に描いたときの最新のログidを覚える
   const boards = new Map<string, Built<string | undefined>>()
   const stepped = new Map<string, Spent>()
+  // 作り直しを後回しにしたSVGごとの、描き直しのタイマー。1枚につき1つだけ持つ
+  const pending = new Map<string, Timer>()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'netdive', description: '電脳監視パネルを開く' })
@@ -372,45 +406,78 @@ export const register: Register = on => {
     const drawWidth = drawWidthOf(e.props.bodyColumns)
     const layout = layoutOf(drawWidth)
     // 各SVGは、表示する内容(nowを除く入力)が前と同じなら、前に作った文字列をそのまま返す。
-    // 内容が変わったときだけ作り直し、数字は前に表示した値から数え上げる
+    // 内容が変わったときだけ作り直し、数字は前に表示した値から数え上げる。
+    // 作り直しを後回しにしたSVGは、間隔が空いたところでredrawを進めてパネルを描き直させる
+    const later = (slot: string) => (wait: number) => {
+      if (pending.has(slot)) return
+      pending.set(
+        slot,
+        $.clock.after(wait, () => {
+          pending.delete(slot)
+          void update($, redraw, n => n + 1)
+        }),
+      )
+    }
+    await read($, redraw)
     const newest = list.at(-1)?.id
-    const power = rebuild(
-      powers,
-      `${e.surface}:power`,
-      JSON.stringify({ windows, map, at, layout, drawWidth }),
-      shownOf(windows, map),
-      (previous, hasMotion) =>
-        powerSvg(windows, map, at, layout, drawWidth, hasMotion ? { from: previous ?? NO_POWER, isBoot: previous === undefined } : undefined),
-    )
-    const vitals = rebuild(
-      vitalsMap,
-      `${e.surface}:vitals`,
-      JSON.stringify({ spent, tally, origin, layout, drawWidth }),
-      { cost: spent, tokens: tally },
-      (previous, hasMotion) => ({
+    const powerSlot = `${e.surface}:power`
+    const power = rebuild({
+      cache: powers,
+      slot: powerSlot,
+      key: JSON.stringify({ windows, map, at }),
+      shape: `${layout}:${drawWidth}`,
+      shown: shownOf(windows, map),
+      now,
+      gap: GAP.power,
+      later: later(powerSlot),
+      // 秒はSVGを読み込んだときから進むので、起点(at)ではなく作った時刻から数える。
+      // 作り直しを後回しにすると、起点から作るまでの分だけ時計が遅れるため
+      make: (previous, hasMotion) => ({
+        ...powerSvg(windows, map, now, layout, drawWidth, hasMotion ? { from: previous ?? NO_POWER, isBoot: previous === undefined } : undefined),
+        alt: powerRows(windows, map, now)
+          .map(row => row.text)
+          .join(' / '),
+      }),
+    })
+    const vitalsSlot = `${e.surface}:vitals`
+    const vitals = rebuild({
+      cache: vitalsMap,
+      slot: vitalsSlot,
+      key: JSON.stringify({ spent, tally, origin }),
+      shape: `${layout}:${drawWidth}`,
+      shown: { cost: spent, tokens: tally },
+      now,
+      gap: GAP.vitals,
+      later: later(vitalsSlot),
+      make: (previous, hasMotion) => ({
         ...vitalsSvg(spent, tally, origin, now, layout, drawWidth, hasMotion ? { from: previous ?? NO_VITALS, isBoot: previous === undefined } : undefined),
         alt: vitalsRow(spent, tally, origin, now),
       }),
-    )
+    })
     const rows = logRowsFor(layout, drawWidth, paneHeightOf(e.props.scroll.bodyRows), power.height + vitals.height, squad)
-    const board = rebuild(
-      boards,
-      `${e.surface}:board`,
-      JSON.stringify({ state, decision, list, squad, origin, layout, drawWidth, rows }),
-      newest,
+    const boardSlot = `${e.surface}:board`
+    const board = rebuild({
+      cache: boards,
+      slot: boardSlot,
+      key: JSON.stringify({ state, decision, list, squad, origin }),
+      shape: `${layout}:${drawWidth}:${rows}`,
+      shown: newest,
+      now,
+      gap: GAP.board,
+      later: later(boardSlot),
       // 最新のログが前に描いたときと同じ(判定だけが変わった)なら、打ち込み直さない
-      (previous, hasMotion) =>
-        boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows, hasMotion ? { now, freshId: newest !== previous ? newest : undefined } : undefined),
-    )
+      make: (previous, hasMotion) => ({
+        ...boardSvg(state, decision, list, squad, origin, layout, drawWidth, rows, hasMotion ? { now, freshId: newest !== previous ? newest : undefined } : undefined),
+        alt: `状況: ${VERDICT_TEXT[decision]}、電脳ログ ${list.length}件`,
+      }),
+    })
     return (
       <Box flexDirection="column" backgroundColor={VOID}>
         <Svg
           source={power.source}
           width={power.width}
           height={power.height}
-          alt={`電脳負荷: ${powerRows(windows, map, at)
-            .map(row => row.text)
-            .join(' / ')}`}
+          alt={`電脳負荷: ${power.alt}`}
           isInteractive
         />
         <Svg
@@ -424,7 +491,7 @@ export const register: Register = on => {
           source={board.source}
           width={board.width}
           height={board.height}
-          alt={`作業班トレース 状況: ${VERDICT_TEXT[decision]}、電脳ログ ${list.length}件`}
+          alt={`作業班トレース ${board.alt}`}
           isInteractive
         />
       </Box>

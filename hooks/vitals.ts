@@ -73,8 +73,8 @@ const figureOf = (to: number, from: number, motion: VitalsMotion | undefined, fo
 const perTurn = (cost: number | null, tokens: TokenTally): number | undefined =>
   cost === null || tokens.turns === 0 ? undefined : cost / tokens.turns
 
-const BIG_FRAMES = 24
-const ROW_FRAMES = 18
+const BIG_FRAMES = 12
+const ROW_FRAMES = 10
 
 const show = (
   figure: Figure,

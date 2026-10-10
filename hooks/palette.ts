@@ -12,8 +12,6 @@ export const MOSS = '#2F8F3A'
 export const PAPER = '#B9F5B0'
 // 方眼の線。地からわずかに浮く程度にする
 export const GRID = '#0A2A12'
-// 数字が着地した瞬間や、打刻の瞬間に光る白に近い緑
-export const FLASH = '#E8FFE0'
 
 // 日本語はゴシック体、英字の見出しはHelvetica系の太い大文字、ログは等幅で描く
 export const GOTHIC = "'Hiragino Kaku Gothic StdN','Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic','Noto Sans JP',sans-serif"
@@ -124,10 +122,8 @@ export const tagWidth = (size: number, body: string, face: Face = 'gothic'): num
 export const crtDefs = (): string =>
   `<pattern id="scan" width="4" height="3" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#000" opacity="0.32"/></pattern>
   <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="${GRID}" stroke-width="1"/></pattern>
-  <filter id="glow" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-  <linearGradient id="refresh" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${GREEN}" stop-opacity="0"/><stop offset="0.5" stop-color="${GREEN}" stop-opacity="0.07"/><stop offset="1" stop-color="${GREEN}" stop-opacity="0"/></linearGradient>`
+  <filter id="glow" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
 
-// 走査線に加えて、古いCRTのリフレッシュのように、淡い帯が7秒かけて画面の上から下へ流れる
+// 走査線。画面を流れるリフレッシュの帯は、明るさの揺れがチラつきに見えるので置かない
 export const scanlines = (width: number, height: number): string =>
-  `<rect width="${width}" height="${height}" fill="url(#scan)" pointer-events="none"/>
-  <rect y="-60" width="${width}" height="60" fill="url(#refresh)" pointer-events="none"><animate attributeName="y" from="-60" to="${height}" dur="7s" repeatCount="indefinite"/></rect>`
+  `<rect width="${width}" height="${height}" fill="url(#scan)" pointer-events="none"/>`
